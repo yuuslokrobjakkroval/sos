@@ -218,7 +218,7 @@ async fn describe(
             "keep_alive": "5m",
             // Some models (e.g. qwen3-vl) think before answering even with think=false,
             // so leave room for the thinking plus the short caption.
-            "options": { "temperature": 0.1, "num_predict": 1500 },
+            "options": { "temperature": 0.1, "num_predict": 3000 },
             "messages": [{ "role": "user", "content": prompt, "images": b64 }],
         }))
         .send()
@@ -239,6 +239,37 @@ async fn describe(
     // Ran out of tokens while thinking: use the last quoted candidate from the thoughts.
     let thinking = body["message"]["thinking"].as_str().unwrap_or_default();
     Ok(last_quoted(thinking).unwrap_or_default())
+}
+
+/// True when a "caption" is really a piece of our own prompt repeated back.
+fn echoes_instructions(caption: &str) -> bool {
+    let c = caption.to_lowercase();
+    let c = c.trim_end_matches(['.', ' ']);
+    // Only the instruction sentences — the example captions in the prompts are valid answers.
+    const INSTRUCTIONS: &[&str] = &[
+        RULES,
+        "reply with the caption only",
+        "write one short caption (at most 15 words)",
+        "silent screen-recording tutorial",
+        "if nothing meaningful changed",
+    ];
+    c.len() >= 12 && INSTRUCTIONS.iter().any(|p| p.to_lowercase().contains(c))
+}
+
+/// True when `next` says nothing new compared to `previous`
+/// (e.g. "Click Register." after "Click Register to begin.").
+fn repeats(previous: &str, next: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let (p, n) = (norm(previous), norm(next));
+    !n.is_empty() && (p == n || p.starts_with(&format!("{n} ")) || n.starts_with(&format!("{p} ")))
 }
 
 /// The last "double-quoted" phrase in a text, e.g. a caption a model considered while thinking.
@@ -283,8 +314,8 @@ where
             .await
             .with_context(|| format!("describing the screen at {}s", frame.time_ms / 1000))?;
         tracing::debug!(t = frame.time_ms, reply = %reply.trim(), "vision reply");
-        if let Some(caption) = clean_caption(&reply) {
-            let duplicate = previous.is_some_and(|p| p.eq_ignore_ascii_case(&caption));
+        if let Some(caption) = clean_caption(&reply).filter(|c| !echoes_instructions(c)) {
+            let duplicate = previous.is_some_and(|p| repeats(p, &caption));
             if !duplicate {
                 steps.push((frame.time_ms, caption));
             }
@@ -401,6 +432,24 @@ mod tests {
         assert_eq!(clean_caption("Caption: Enter your email").as_deref(), Some("Enter your email"));
         assert_eq!(clean_caption("SAME"), None);
         assert_eq!(clean_caption("  \n"), None);
+    }
+
+    #[test]
+    fn rejects_echoed_instructions() {
+        assert!(echoes_instructions("Never write passwords or other private"));
+        assert!(echoes_instructions("Reply with the caption only."));
+        assert!(!echoes_instructions("Click Continue."), "real steps must be kept");
+        assert!(!echoes_instructions("Enter a password in the Password field."));
+        assert!(!echoes_instructions("ចុចលើ Register"));
+    }
+
+    #[test]
+    fn detects_repeated_captions() {
+        assert!(repeats("Click Register to begin using the chat app.", "Click Register."));
+        assert!(repeats("Click Continue", "click continue."));
+        assert!(!repeats("Click Register.", "Click Continue."));
+        assert!(repeats("Type your email.", "Type your email address in the Email field."));
+        assert!(!repeats("Type your email.", "Type your username."));
     }
 
     #[test]

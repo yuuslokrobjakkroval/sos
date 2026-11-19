@@ -1,0 +1,12 @@
+[package]
+name = "automate-server"
+version = "0.1.0"
+edition = "2021"
+description = "Automate web server: serves the API and the website"
+
+[dependencies]
+anyhow = "1"
+automate-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

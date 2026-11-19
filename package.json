@@ -1,0 +1,14 @@
+{
+  "name": "automate",
+  "private": true,
+  "description": "Upload a video, get transcript, captions and speaking speed. Rust engine + React UI (website & desktop).",
+  "scripts": {
+    "setup": "powershell -ExecutionPolicy Bypass -File scripts/setup-tools.ps1",
+    "build:web": "npm --prefix app run build",
+    "server": "cargo run --release -p automate-server",
+    "dev:web": "npm --prefix app run dev",
+    "dev:desktop": "npm --prefix app run tauri dev",
+    "build:desktop": "npm --prefix app run tauri build",
+    "test": "cargo test -p automate-core"
+  }
+}

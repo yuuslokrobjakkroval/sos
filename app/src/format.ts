@@ -1,4 +1,4 @@
-import type { Status, Stats } from "./api";
+import type { Locale } from "./i18n/types";
 
 export function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -16,48 +16,40 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-export const STATUS_LABEL: Record<Status, string> = {
-  queued: "Queued",
-  extracting_audio: "Extracting audio",
-  transcribing: "Transcribing",
-  analyzing: "Analyzing",
-  reading_screen: "Reading screen",
-  done: "Done",
-  failed: "Failed",
-};
-
-export const isWorking = (s: Status) => s !== "done" && s !== "failed";
-
-/** "Reading screen 45%" while progress is known. */
-export function statusText(status: Status, progress: number | null): string {
-  const label = STATUS_LABEL[status];
-  return progress != null && isWorking(status) ? `${label} ${Math.round(progress * 100)}%` : label;
+export function formatNumber(value: number, locale: Locale): string {
+  return new Intl.NumberFormat(locale === "km" ? "km-KH" : "en").format(value);
 }
 
-export const PACE_LABEL: Record<Stats["pace"], string> = {
-  slow: "Slow",
-  normal: "Normal",
-  fast: "Fast",
-  no_speech: "No speech",
-  no_audio: "No sound",
-};
-
-export const LANGUAGES: { code: string; name: string }[] = [
-  { code: "auto", name: "Auto-detect" },
-  { code: "en", name: "English" },
-  { code: "km", name: "Khmer" },
-  { code: "zh", name: "Chinese" },
-  { code: "th", name: "Thai" },
-  { code: "vi", name: "Vietnamese" },
-  { code: "ja", name: "Japanese" },
-  { code: "ko", name: "Korean" },
-  { code: "fr", name: "French" },
-  { code: "es", name: "Spanish" },
-  { code: "de", name: "German" },
-  { code: "id", name: "Indonesian" },
-];
-
-export function languageName(code: string | null | undefined): string {
-  if (!code) return "—";
-  return LANGUAGES.find((l) => l.code === code)?.name ?? code.toUpperCase();
+export function formatWhen(iso: string, locale: Locale): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat(locale === "km" ? "km-KH" : "en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
 }
+
+/** Same thresholds the engine uses: slow under 110 wpm, fast over 160. */
+export function paceFromWpm(wpm: number): "slow" | "normal" | "fast" {
+  if (wpm < 110) return "slow";
+  if (wpm > 160) return "fast";
+  return "normal";
+}
+
+export const LANGUAGE_CODES = [
+  "auto",
+  "en",
+  "km",
+  "zh",
+  "th",
+  "vi",
+  "ja",
+  "ko",
+  "fr",
+  "es",
+  "de",
+  "id",
+] as const;
+
+export type LanguageCode = (typeof LANGUAGE_CODES)[number];

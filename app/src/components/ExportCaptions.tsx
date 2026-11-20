@@ -6,27 +6,29 @@ import {
   type CaptionExport,
   type ExportMode,
 } from "../api";
+import { useI18n } from "../i18n/I18nProvider";
+import { fill } from "../i18n/text";
 
-interface Props {
-  videoId: string;
-  language: string;
+function kind(dict: ReturnType<typeof useI18n>["dict"], mode: ExportMode): string {
+  return mode === "soft" ? dict.captionExport.softKind : dict.captionExport.burnedKind;
 }
 
-function kind(mode: ExportMode): string {
-  return mode === "soft" ? "soft subtitles" : "burned-in captions";
-}
-
-function statusLine(job: CaptionExport): string {
-  if (job.status === "queued") return `Waiting to export ${kind(job.mode)}…`;
+function statusLine(dict: ReturnType<typeof useI18n>["dict"], job: CaptionExport): string {
+  const label = kind(dict, job.mode);
+  if (job.status === "queued") return fill(dict.captionExport.waiting, { kind: label });
   if (job.status === "rendering") {
-    const pct = job.progress != null ? ` ${Math.round(job.progress * 100)}%` : "";
-    return `Exporting ${kind(job.mode)}…${pct}`;
+    if (job.progress == null) return fill(dict.captionExport.renderingPlain, { kind: label });
+    return fill(dict.captionExport.rendering, {
+      kind: label,
+      percent: Math.round(job.progress * 100),
+    });
   }
-  if (job.status === "failed") return job.error ?? "Export failed.";
-  return "Captioned video is ready.";
+  if (job.status === "failed") return job.error ?? dict.captionExport.failedFallback;
+  return dict.captionExport.ready;
 }
 
-export default function ExportCaptions({ videoId, language }: Props) {
+export default function ExportCaptions({ videoId, language }: { videoId: string; language: string }) {
+  const { dict } = useI18n();
   const [mode, setMode] = useState<ExportMode>("burned");
   const [picked, setPicked] = useState(false);
   const [job, setJob] = useState<CaptionExport | null>(null);
@@ -67,8 +69,8 @@ export default function ExportCaptions({ videoId, language }: Props) {
     setStarting(true);
     try {
       setJob(await startExport(videoId, mode));
-    } catch (e) {
-      setError((e as Error).message);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : dict.captionExport.failedFallback);
       getExport(videoId)
         .then(setJob)
         .catch(() => {});
@@ -80,50 +82,60 @@ export default function ExportCaptions({ videoId, language }: Props) {
   const busy = starting || running;
   const ready = job?.status === "done" && job.mode === mode;
   const showStatus = job && (job.status !== "done" || job.mode === mode);
+  const percent = Math.round((job?.progress ?? 0) * 100);
+  const khmer = language.toLowerCase().startsWith("km");
 
   return (
-    <div className="export-panel">
-      <h3>Export video with captions</h3>
-      <p className="muted">
-        Burned-in captions are drawn onto the picture. Soft subtitles are a separate track the
-        viewer can turn on or off.
-      </p>
+    <section className="card export-panel">
+      <h2>{dict.captionExport.title}</h2>
+      <p className="muted">{dict.captionExport.lead}</p>
       <div className="export-row">
-        <select
-          aria-label="Caption style"
-          value={mode}
-          disabled={busy}
-          onChange={(e) => {
-            setPicked(true);
-            setMode(e.target.value as ExportMode);
-          }}
-        >
-          <option value="burned">Burned-in</option>
-          <option value="soft">Soft subtitles</option>
-        </select>
-        <button className="btn" onClick={start} disabled={busy}>
-          {busy ? "Exporting…" : "Export"}
+        <label className="field grow">
+          <span>{dict.captionExport.styleLabel}</span>
+          <select
+            value={mode}
+            disabled={busy}
+            onChange={(event) => {
+              setPicked(true);
+              setMode(event.target.value as ExportMode);
+            }}
+          >
+            <option value="burned">{dict.captionExport.burned}</option>
+            <option value="soft">{dict.captionExport.soft}</option>
+          </select>
+        </label>
+        <button type="button" className="btn primary" onClick={() => void start()} disabled={busy}>
+          {busy ? dict.captionExport.working : dict.captionExport.action}
         </button>
         {ready && (
           <a className="btn" href={exportFileUrl(videoId)} download>
-            Download video
+            {dict.captionExport.download}
           </a>
         )}
       </div>
       {running && (
-        <div className="progress">
-          <div style={{ width: `${Math.round((job?.progress ?? 0) * 100)}%` }} />
+        <div
+          className="progress"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          aria-label={job ? statusLine(dict, job) : dict.captionExport.working}
+        >
+          <div style={{ width: `${percent}%` }} />
         </div>
       )}
-      {showStatus && (
-        <p className={job?.status === "failed" ? "error-text" : "muted"}>{statusLine(job)}</p>
-      )}
-      {error && <p className="error-text">{error}</p>}
-      {language === "km" && mode === "burned" && (
-        <p className="muted">
-          Burned-in Khmer text uses Khmer OS Battambang when that font is installed.
+      {showStatus && job && (
+        <p className={job.status === "failed" ? "field-error" : "muted"} role="status">
+          {statusLine(dict, job)}
         </p>
       )}
-    </div>
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      {khmer && mode === "burned" && <p className="muted">{dict.captionExport.khmerFont}</p>}
+    </section>
   );
 }

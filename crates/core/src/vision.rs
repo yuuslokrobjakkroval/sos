@@ -279,7 +279,12 @@ fn last_quoted(text: &str) -> Option<String> {
         .step_by(2)
         .rev()
         .map(|i| parts[i].trim())
-        .find(|p| (3..=120).contains(&p.len()))
+        // A full instruction, not a fragment like "Email field" (scripts such as Khmer
+        // don't separate words with spaces, so any non-ASCII candidate is accepted).
+        .find(|p| {
+            (3..=160).contains(&p.len())
+                && (p.split_whitespace().count() >= 3 || !p.is_ascii())
+        })
         .map(str::to_string)
 }
 
@@ -457,6 +462,8 @@ mod tests {
         let t = r#"Maybe "Typed password". Better: "Enter a password in the Password field." Done"#;
         assert_eq!(last_quoted(t).as_deref(), Some("Enter a password in the Password field."));
         assert_eq!(last_quoted("no quotes"), None);
+        assert_eq!(last_quoted(r#"the "Email field" changed"#), None);
+        assert_eq!(last_quoted(r#"maybe "ចុចលើ Register""#).as_deref(), Some("ចុចលើ Register"));
     }
 
     #[test]

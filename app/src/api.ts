@@ -92,6 +92,26 @@ export const mediaUrl = (id: string) => `${API_BASE}/api/videos/${id}/media`;
 export const captionsUrl = (id: string, format: "srt" | "vtt" | "txt") =>
   `${API_BASE}/api/videos/${id}/captions/${format}`;
 
+export type ExportMode = "burned" | "soft";
+export type ExportStatus = "queued" | "rendering" | "done" | "failed";
+
+export interface CaptionExport {
+  video_id: string;
+  mode: ExportMode;
+  status: ExportStatus;
+  progress: number | null;
+  error: string | null;
+}
+
+export const getExport = (id: string) => request<CaptionExport>(`/api/videos/${id}/export`);
+export const startExport = (id: string, mode: ExportMode) =>
+  request<CaptionExport>(`/api/videos/${id}/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+export const exportFileUrl = (id: string) => `${API_BASE}/api/videos/${id}/export/file`;
+
 /** Upload with progress reporting (fetch can't report upload progress). */
 export function uploadVideo(
   file: File,

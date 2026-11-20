@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::db::VideoRow;
+use crate::db::{ExportRow, VideoRow};
 
 /// One timed piece of the transcript (becomes one caption cue).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +82,28 @@ impl VideoDto {
             created_at: row.created_at,
             updated_at: row.updated_at,
             result,
+        }
+    }
+}
+
+/// Status of a captioned-video export (`burned` or `soft`).
+#[derive(Debug, Serialize)]
+pub struct ExportDto {
+    pub video_id: String,
+    pub mode: String,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub error: Option<String>,
+}
+
+impl ExportDto {
+    pub fn from_row(row: ExportRow) -> Self {
+        Self {
+            video_id: row.video_id,
+            mode: row.mode,
+            status: row.status,
+            progress: row.progress,
+            error: row.error,
         }
     }
 }

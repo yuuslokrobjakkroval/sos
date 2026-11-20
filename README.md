@@ -4,6 +4,7 @@ Upload a video and get:
 
 - **Text**: a full transcript of what is said
 - **Captions**: timed subtitles you can download as **SRT** (YouTube, Facebook, CapCut, Premiere) or **VTT** (web players), shown live on the video
+- **Captioned video**: export the video again with those captions **burned in** (always visible) or as **soft subtitles** (a track the viewer can turn on)
 - **Speed**: speaking speed in **words per minute**, overall and for every caption line, labeled *Slow* (under 110), *Normal* or *Fast* (over 160)
 
 It runs as a **website** and as a **desktop app** (Windows, plus macOS and Linux). Both use the same Rust engine and the same UI.
@@ -20,6 +21,7 @@ It costs nothing to run. Speech recognition uses [whisper.cpp](https://github.co
      1. ffmpeg      extract 16 kHz mono audio
      2. whisper-cli transcribe with timestamps
      3. analysis    captions (SRT/VTT) + words-per-minute
+     4. optional    export the video with burned-in or soft captions
 ```
 
 | Folder | What it is |
@@ -171,6 +173,7 @@ The desktop app keeps its data in `%APPDATA%\com.automate.videotext`.
 | `FFMPEG_PATH`, `FFPROBE_PATH` | found on PATH | Where to find ffmpeg and ffprobe |
 | `WHISPER_BIN` | `tools/whisper/whisper-cli` (`.exe` on Windows) | Where to find whisper.cpp |
 | `WHISPER_MODEL` | best `ggml-*.bin` in `tools/models` | Speech model. English-only files such as `ggml-base.en.bin` are included |
+| `CAPTION_FONT_KM` | Khmer OS Battambang, then Siemreap, then Noto Sans Khmer | Burned-in Khmer font. Set a family name (`Khmer OS Battambang`) or a `.ttf` path |
 
 ## API
 
@@ -182,6 +185,9 @@ The desktop app keeps its data in `%APPDATA%\com.automate.videotext`.
 | `GET` | `/api/videos/{id}` | Status and results (`text`, `segments`, `stats`) |
 | `GET` | `/api/videos/{id}/media` | Stream the original video (supports seeking) |
 | `GET` | `/api/videos/{id}/captions/{srt\|vtt\|txt}` | Download captions or plain text |
+| `POST` | `/api/videos/{id}/export` | Start a captioned-video export. JSON body `{ "mode": "burned" }` or `{ "mode": "soft" }` |
+| `GET` | `/api/videos/{id}/export` | Status and progress of that export |
+| `GET` | `/api/videos/{id}/export/file` | Download the captioned MP4 once it is ready |
 | `POST` | `/api/videos/{id}/retry` | Retry a failed analysis |
 | `DELETE` | `/api/videos/{id}` | Delete a video and its results |
 
@@ -201,6 +207,8 @@ npm test     # Rust unit tests for captions and speed analysis
 
 - **Speed**: transcription runs on the CPU. With the `base` model, a 10-minute video takes roughly 1–3 minutes on a modern PC. Larger models are more accurate but slower.
 - **Khmer, Thai and Chinese**: these languages are written without spaces between words, so the word count, and therefore words per minute, comes out lower than the true value. Transcripts and captions are not affected. Use `large-v3-turbo` for the best Khmer accuracy.
+- **Captioned video**: from a finished video, choose **Burned-in** or **Soft subtitles**. Burned-in captions are white, centered at the bottom, and scaled to the picture height (a dark outline, or for Khmer an opaque black box). Soft subtitles are an MP4 subtitle track (`mov_text`) that players can toggle. Long lines are split into short cues (about two lines, 42 characters each; Khmer stays nearer 30–35 characters so a coeng cluster is not cut in half).
+- **Khmer burned-in font**: the default face is **Khmer OS Battambang** (regular weight — bold muddies the vowels). On Debian and Ubuntu install it with `sudo apt install fonts-khmeros` (`/usr/share/fonts/truetype/khmeros/KhmerOSbattambang.ttf`). On Windows put `KhmerOSbattambang.ttf` in `C:\Windows\Fonts`, and on macOS in `~/Library/Fonts` or `/Library/Fonts`. If Battambang is missing, the engine tries **Khmer OS Siemreap**, then **Noto Sans Khmer**, then the default font, and logs which one it used. Override the choice with `CAPTION_FONT_KM` (a family name or a `.ttf` path).
 - **Security**: the server has no login yet. It listens only on `127.0.0.1` by default. Add accounts before exposing it to the internet.
 
 ## Roadmap
@@ -208,5 +216,4 @@ npm test     # Rust unit tests for captions and speed analysis
 - User accounts and login before going public
 - Mobile apps (iOS and Android) built from the same Tauri project (`tauri android init`, `tauri ios init`; iOS needs a Mac). On phones the engine should run on a server, not on the device
 - Translating captions into other languages
-- Burning captions into the video (ffmpeg `subtitles` filter)
 - An AI summary of each video

@@ -28,6 +28,10 @@ pub struct Config {
     pub ollama_url: String,
     /// `VISION_MODEL` — Ollama vision model; picked automatically when unset.
     pub vision_model: Option<String>,
+    /// `CAPTION_FONT_KM` — Khmer burned-in font. A `.ttf` path, or a family
+    /// name such as `Khmer OS Battambang`. When unset, Battambang, then
+    /// Siemreap, then Noto Sans Khmer are tried.
+    pub caption_font_km: Option<String>,
 }
 
 impl Config {
@@ -91,6 +95,7 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             vision_model: env("VISION_MODEL"),
+            caption_font_km: env("CAPTION_FONT_KM"),
         }
     }
 }

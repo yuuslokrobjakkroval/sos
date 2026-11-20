@@ -28,14 +28,17 @@ It costs nothing to run. Speech recognition uses [whisper.cpp](https://github.co
 | `crates/server` | Website server: runs the engine and serves the built UI from `app/dist` |
 | `app/` | React + TypeScript UI, shared by the website and the desktop app |
 | `app/src-tauri` | Desktop app: starts the engine inside the app on `127.0.0.1:17890` and opens the UI |
-| `scripts/setup-tools.ps1` | Downloads the free whisper.cpp program and a speech model into `tools/` |
+| `scripts/setup-tools.ps1` | Windows: downloads whisper.cpp and a speech model into `tools/` |
+| `scripts/setup-tools.sh` | Linux and macOS: builds `whisper-cli` and downloads a speech model into `tools/` |
 | `data/` | Created at runtime: `automate.db`, uploaded videos and job files |
 
 ## One-time setup
 
-You need these free tools installed:
+Building the engine requires **Rust 1.88 or newer**. This `Cargo.lock` needs that toolchain; Debian's packaged Rust 1.85 is too old. Install Rust with [rustup](https://rustup.rs).
 
-1. **Rust**: `winget install Rustlang.Rustup` (on Windows, also install *Visual Studio Build Tools* with the "Desktop development with C++" workload)
+### Windows
+
+1. **Rust**: `winget install Rustlang.Rustup` (also install *Visual Studio Build Tools* with the "Desktop development with C++" workload)
 2. **Node.js 20+**
 3. **ffmpeg**: `winget install Gyan.FFmpeg`
 4. **Whisper and a model**. Run this from the project folder:
@@ -46,9 +49,63 @@ You need these free tools installed:
    powershell -ExecutionPolicy Bypass -File scripts\setup-tools.ps1 -Model large-v3-turbo
    ```
 
-   The engine automatically uses the largest model it finds in `tools\models`.
+   The engine uses the best `ggml-*.bin` it finds in `tools\models`, including English-only files such as `ggml-base.en.bin`. Larger models win. A multilingual model wins over the `.en` file of the same size.
 
 5. **Frontend packages**: `npm --prefix app install`
+
+### Linux and macOS
+
+On Linux and macOS, build `whisper-cli` from source with cmake and download a model (for example the English-only `ggml-base.en.bin` from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp)).
+
+1. **Rust 1.88+** with rustup:
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. **Node.js 20+**
+3. **ffmpeg**, a C compiler, cmake, and git:
+
+   ```bash
+   # Debian/Ubuntu
+   sudo apt install ffmpeg build-essential cmake git curl
+   # macOS
+   brew install ffmpeg cmake git
+   ```
+
+4. **Whisper and a model**, from the project folder:
+
+   ```bash
+   bash scripts/setup-tools.sh              # ggml-base.bin
+   bash scripts/setup-tools.sh base.en      # ggml-base.en.bin (~142 MB, English)
+   bash scripts/setup-tools.sh large-v3-turbo
+   ```
+
+   The script builds `whisper-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and puts it in `tools/whisper/`, then downloads the model into `tools/models/`. To do that by hand:
+
+   ```bash
+   git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git /tmp/whisper.cpp
+   cmake -S /tmp/whisper.cpp -B /tmp/whisper.cpp/build \
+     -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+   cmake --build /tmp/whisper.cpp/build -j --target whisper-cli
+   mkdir -p tools/whisper tools/models
+   cp /tmp/whisper.cpp/build/bin/whisper-cli tools/whisper/whisper-cli
+   chmod +x tools/whisper/whisper-cli
+
+   curl -fL -o tools/models/ggml-base.en.bin \
+     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+   ```
+
+   If `whisper-cli` still looks for shared libraries next to the build tree, copy those `libggml` / `libwhisper` files into `tools/whisper/` as well (the setup script does this). Any `ggml-*.bin` in `tools/models` is picked up automatically, including `.en` and quantized names. Set `WHISPER_MODEL` to force one file.
+
+5. **Desktop app system packages (Linux).** Building with Tauri needs the webkit2gtk 4.1, GTK 3, and libsoup 3 development packages:
+
+   ```bash
+   sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+     libssl-dev patchelf librsvg2-dev
+   ```
+
+6. **Frontend packages**: `npm --prefix app install`
 
 ## Silent videos (screen recordings with no voice)
 
@@ -96,7 +153,10 @@ The installers are written to `target\release\bundle\` (`nsis\*.exe` and `msi\*.
 The desktop app keeps its data in `%APPDATA%\com.automate.videotext`.
 
 > **Installed desktop app:** the installer does not include the large Whisper model. Copy the
-> project's `tools` folder to `%APPDATA%\com.automate.videotext\tools`, or set the
+> project's `tools` folder into the app data directory (`tools` inside
+> `%APPDATA%\com.automate.videotext` on Windows,
+> `~/Library/Application Support/com.automate.videotext` on macOS, or
+> `~/.local/share/com.automate.videotext` on Linux), or set the
 > `WHISPER_BIN` and `WHISPER_MODEL` environment variables. ffmpeg must also be installed.
 > When something is missing, the app shows a "Setup needed" banner.
 
@@ -109,8 +169,8 @@ The desktop app keeps its data in `%APPDATA%\com.automate.videotext`.
 | `AUTOMATE_STATIC_DIR` | `app/dist` | The built UI to serve |
 | `AUTOMATE_MAX_UPLOAD_MB` | `1024` | Upload size limit |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | found on PATH | Where to find ffmpeg and ffprobe |
-| `WHISPER_BIN` | `tools/whisper/whisper-cli.exe` | Where to find whisper.cpp |
-| `WHISPER_MODEL` | largest found in `tools/models` | The speech model to use |
+| `WHISPER_BIN` | `tools/whisper/whisper-cli` (`.exe` on Windows) | Where to find whisper.cpp |
+| `WHISPER_MODEL` | best `ggml-*.bin` in `tools/models` | Speech model. English-only files such as `ggml-base.en.bin` are included |
 
 ## API
 

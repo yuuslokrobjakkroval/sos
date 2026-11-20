@@ -56,27 +56,59 @@ async fn process(state: &AppState, id: &str) -> anyhow::Result<AnalysisResult> {
     db::set_status(&state.db, id, "extracting_audio").await?;
     let duration_ms = probe_duration_ms(&cfg.ffprobe, &input).await;
     if has_audio_stream(&cfg.ffprobe, &input).await == Some(false) {
-        return read_screen_or(state, &row, &work, duration_ms, analysis::silent(duration_ms)).await;
+        return read_screen_or(
+            state,
+            &row,
+            &work,
+            duration_ms,
+            analysis::silent(duration_ms),
+        )
+        .await;
     }
     let wav = work.join("audio.wav");
     run(
         &cfg.ffmpeg,
         args![
-            "-y", "-hide_banner", "-loglevel", "error", "-i", &input, "-vn", "-ac", "1", "-ar",
-            "16000", "-c:a", "pcm_s16le", &wav
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            &input,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            &wav
         ],
     )
     .await
     .context("could not extract audio (does the file have a sound track?)")?;
 
     // Silent track (e.g. screen recording with the mic off): nothing to transcribe.
-    if let Some(max_db) = max_volume_db(&cfg.ffmpeg, &wav).await {
+    let peak_db = max_volume_db(&cfg.ffmpeg, &wav).await;
+    if let Some(max_db) = peak_db {
         if max_db < SILENCE_BELOW_DB {
             tracing::info!(%id, max_db, "audio is silent, skipping transcription");
             let _ = tokio::fs::remove_file(&wav).await;
-            return read_screen_or(state, &row, &work, duration_ms, analysis::silent(duration_ms)).await;
+            return read_screen_or(
+                state,
+                &row,
+                &work,
+                duration_ms,
+                analysis::silent(duration_ms),
+            )
+            .await;
         }
     }
+    let audio_ms = probe_duration_ms(&cfg.ffprobe, &wav)
+        .await
+        .or(duration_ms)
+        .unwrap_or(0);
+    let silences = detect_silence(&cfg.ffmpeg, &wav, peak_db, audio_ms).await;
 
     // 2. Transcribe with timestamps.
     db::set_status(&state.db, id, "transcribing").await?;
@@ -95,8 +127,25 @@ async fn process(state: &AppState, id: &str) -> anyhow::Result<AnalysisResult> {
     run(
         &cfg.whisper_bin,
         args![
-            "-m", &cfg.whisper_model, "-f", &wav, "-l", &row.language, "-t", &threads, "-oj",
-            "-of", &out_base, "-np"
+            "-m",
+            &cfg.whisper_model,
+            "-f",
+            &wav,
+            "-l",
+            &row.language,
+            "-t",
+            &threads,
+            // Full JSON includes per-token probabilities. `-sns` drops non-speech
+            // tokens such as `[Music]`. `-nth 0.6` is Whisper's no-speech threshold:
+            // a window is skipped only when the model is sure it is silence and the
+            // text is also a poor fit, so quiet real speech is still decoded.
+            "-ojf",
+            "-of",
+            &out_base,
+            "-np",
+            "-sns",
+            "-nth",
+            "0.6",
         ],
     )
     .await
@@ -111,7 +160,7 @@ async fn process(state: &AppState, id: &str) -> anyhow::Result<AnalysisResult> {
     let text = String::from_utf8_lossy(&raw);
     let parsed: analysis::WhisperJson =
         serde_json::from_str(&text).context("could not read whisper output")?;
-    let result = analysis::build(parsed, duration_ms);
+    let result = analysis::build(parsed, duration_ms, &silences);
     let _ = tokio::fs::remove_file(&wav).await;
 
     // Sound but no speech (e.g. music over a screen recording): read the screen instead.
@@ -155,7 +204,11 @@ async fn read_screen_or(
     .await?;
 
     let _ = tokio::fs::remove_dir_all(work.join("frames")).await;
-    Ok(if result.segments.is_empty() { fallback } else { result })
+    Ok(if result.segments.is_empty() {
+        fallback
+    } else {
+        result
+    })
 }
 
 /// Saves a frame each time the screen changes and returns the frames worth describing.
@@ -171,9 +224,18 @@ async fn extract_keyframes(
     let (_, stderr) = run_capture(
         &cfg.ffmpeg,
         args![
-            "-hide_banner", "-nostats", "-i", input, "-an", "-vf", vision::CHANGE_FILTER,
-            "-fps_mode", "vfr",
-            "-q:v", "3", dir.join("%05d.jpg")
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            input,
+            "-an",
+            "-vf",
+            vision::CHANGE_FILTER,
+            "-fps_mode",
+            "vfr",
+            "-q:v",
+            "3",
+            dir.join("%05d.jpg")
         ],
     )
     .await
@@ -197,14 +259,59 @@ async fn extract_keyframes(
 /// Audio whose loudest moment is quieter than this is treated as silence.
 const SILENCE_BELOW_DB: f64 = -60.0;
 
+/// Quiet stretches of the wav, using a floor 30 dB under the peak so a soft
+/// reading is not marked silent from start to finish. Gaps shorter than 0.4 s
+/// (breaths, word breaks) are ignored.
+async fn detect_silence(
+    ffmpeg: &Path,
+    audio: &Path,
+    peak_db: Option<f64>,
+    duration_ms: i64,
+) -> Vec<analysis::SilenceSpan> {
+    let noise = match peak_db {
+        Some(peak) => (peak - 30.0).clamp(-50.0, -32.0),
+        None => -40.0,
+    };
+    let filter = format!("silencedetect=noise={noise:.0}dB:d=0.4");
+    let Ok((_, stderr)) = run_capture(
+        ffmpeg,
+        args![
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            audio,
+            "-af",
+            filter,
+            "-f",
+            "null",
+            "-"
+        ],
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    analysis::parse_silencedetect(&stderr, duration_ms)
+}
+
 /// Peak loudness of an audio file in dB (0 = maximum), via ffmpeg's volumedetect.
 async fn max_volume_db(ffmpeg: &Path, audio: &Path) -> Option<f64> {
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(args!["-hide_banner", "-nostats", "-i", audio, "-af", "volumedetect", "-f", "null", "-"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    cmd.args(args![
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        audio,
+        "-af",
+        "volumedetect",
+        "-f",
+        "null",
+        "-"
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     let out = cmd.output().await.ok()?;
@@ -215,7 +322,17 @@ async fn max_volume_db(ffmpeg: &Path, audio: &Path) -> Option<f64> {
 async fn has_audio_stream(ffprobe: &Path, input: &Path) -> Option<bool> {
     let out = run(
         ffprobe,
-        args!["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", input],
+        args![
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            input
+        ],
     )
     .await
     .ok()?;
@@ -227,8 +344,13 @@ async fn probe_duration_ms(ffprobe: &Path, input: &Path) -> Option<i64> {
     let out = run(
         ffprobe,
         args![
-            "-v", "error", "-show_entries", "format=duration", "-of",
-            "default=noprint_wrappers=1:nokey=1", input
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            input
         ],
     )
     .await

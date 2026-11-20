@@ -7,7 +7,9 @@ pub mod analysis;
 pub mod api;
 pub mod captions;
 pub mod config;
+pub mod cues;
 pub mod db;
+pub mod export;
 pub mod models;
 pub mod pipeline;
 pub mod vision;
@@ -27,6 +29,8 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     /// Sends video ids to the background worker.
     pub queue: mpsc::UnboundedSender<String>,
+    /// Sends video ids to the caption-export worker.
+    pub export_queue: mpsc::UnboundedSender<String>,
 }
 
 /// Start the HTTP API (and the static frontend, if configured) and block forever.
@@ -58,13 +62,23 @@ async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
     let db = db::connect(&cfg.data_dir.join("automate.db")).await?;
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let state = AppState { db, cfg: Arc::new(cfg), queue: tx };
+    let (export_tx, export_rx) = mpsc::unbounded_channel();
+    let state = AppState {
+        db,
+        cfg: Arc::new(cfg),
+        queue: tx,
+        export_queue: export_tx,
+    };
     pipeline::spawn_worker(state.clone(), rx);
+    export::spawn_worker(state.clone(), export_rx);
 
     // Resume jobs that were interrupted by a restart.
     for id in db::unfinished_ids(&state.db).await? {
         db::set_status(&state.db, &id, "queued").await?;
         let _ = state.queue.send(id);
+    }
+    for id in db::requeue_pending_exports(&state.db).await? {
+        let _ = state.export_queue.send(id);
     }
     Ok(state)
 }

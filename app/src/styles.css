@@ -430,6 +430,46 @@ select {
 .btn.small {
   padding: 3px 10px;
 }
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn:disabled:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.export-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.export-panel h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.export-panel .muted,
+.export-panel .error-text {
+  margin: 0;
+}
+.export-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.export-row select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.export-panel .progress {
+  max-width: 280px;
+}
 
 .stats {
   display: grid;

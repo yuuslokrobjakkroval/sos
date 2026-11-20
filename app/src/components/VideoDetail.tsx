@@ -8,6 +8,7 @@ import {
   type Status,
   type Video,
 } from "../api";
+import ExportCaptions from "./ExportCaptions";
 import {
   formatClock,
   isWorking,
@@ -193,6 +194,10 @@ export default function VideoDetail({ summary, onChanged, onDeleted }: Props) {
             Delete
           </button>
         </div>
+
+        {segments.length > 0 && (
+          <ExportCaptions videoId={video.id} language={result?.language ?? video.language} />
+        )}
       </div>
 
       {result && (

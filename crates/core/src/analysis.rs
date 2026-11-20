@@ -38,6 +38,9 @@ pub struct WhisperToken {
     /// Token probability, when whisper-cli included it.
     #[serde(default)]
     pub p: Option<f64>,
+    /// Word-piece timing from whisper.cpp `-ojf`. Missing on plain `-oj` output.
+    #[serde(default)]
+    pub offsets: Option<WhisperOffsets>,
 }
 
 /// A stretch of audio ffmpeg `silencedetect` called silent.

@@ -22,7 +22,8 @@ use tower_http::{
 use crate::{
     captions,
     db::{self, VideoRow},
-    models::{AnalysisResult, VideoDto},
+    export::{self, MODE_SOFT},
+    models::{AnalysisResult, ExportDto, VideoDto},
     pipeline, AppState,
 };
 
@@ -46,6 +47,8 @@ pub fn router(state: AppState) -> Router {
         .route("/videos/{id}", get(get_video).delete(delete_video))
         .route("/videos/{id}/media", get(media))
         .route("/videos/{id}/captions/{format}", get(download_captions))
+        .route("/videos/{id}/export", get(get_export).post(start_export))
+        .route("/videos/{id}/export/file", get(download_export))
         .route("/videos/{id}/retry", axum::routing::post(retry_video));
 
     let mut app = Router::new().nest("/api", api);
@@ -90,7 +93,9 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 async fn find(state: &AppState, id: &str) -> ApiResult<VideoRow> {
-    db::get(&state.db, id).await?.ok_or_else(ApiError::not_found)
+    db::get(&state.db, id)
+        .await?
+        .ok_or_else(ApiError::not_found)
 }
 
 // ---------- handlers ----------
@@ -98,7 +103,9 @@ async fn find(state: &AppState, id: &str) -> ApiResult<VideoRow> {
 /// Reports whether the free local tools (ffmpeg, whisper) are installed.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cfg = &state.cfg;
-    let ffmpeg = pipeline::run(&cfg.ffmpeg, vec!["-version".into()]).await.is_ok();
+    let ffmpeg = pipeline::run(&cfg.ffmpeg, vec!["-version".into()])
+        .await
+        .is_ok();
     // whisper-cli's exit code for --help varies between versions; starting at all is enough.
     let whisper = tokio::process::Command::new(&cfg.whisper_bin)
         .arg("--help")
@@ -130,7 +137,9 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn list_videos(State(state): State<AppState>) -> ApiResult<Json<Vec<VideoDto>>> {
     let rows = db::list(&state.db).await?;
     Ok(Json(
-        rows.into_iter().map(|r| VideoDto::from_row(r, false)).collect(),
+        rows.into_iter()
+            .map(|r| VideoDto::from_row(r, false))
+            .collect(),
     ))
 }
 
@@ -142,7 +151,8 @@ async fn get_video(
 }
 
 fn valid_language(lang: &str) -> bool {
-    lang == "auto" || ((2..=3).contains(&lang.len()) && lang.chars().all(|c| c.is_ascii_lowercase()))
+    lang == "auto"
+        || ((2..=3).contains(&lang.len()) && lang.chars().all(|c| c.is_ascii_lowercase()))
 }
 
 /// `multipart/form-data` with fields `file` (the video) and optional `language` (`auto`, `en`, `km`...).
@@ -163,7 +173,12 @@ async fn upload_video(
     {
         match field.name() {
             Some("language") => {
-                language = field.text().await.map_err(|e| bad(e.body_text()))?.trim().to_lowercase();
+                language = field
+                    .text()
+                    .await
+                    .map_err(|e| bad(e.body_text()))?
+                    .trim()
+                    .to_lowercase();
                 if !valid_language(&language) {
                     return Err(bad(format!("unsupported language code '{language}'")));
                 }
@@ -181,7 +196,11 @@ async fn upload_video(
                     )));
                 }
 
-                let path = state.cfg.data_dir.join("uploads").join(format!("{id}.{ext}"));
+                let path = state
+                    .cfg
+                    .data_dir
+                    .join("uploads")
+                    .join(format!("{id}.{ext}"));
                 let mut file = tokio::fs::File::create(&path).await?;
                 let mut size: u64 = 0;
                 loop {
@@ -243,7 +262,10 @@ async fn retry_video(
 ) -> ApiResult<Json<VideoDto>> {
     let row = find(&state, &id).await?;
     if row.status != "failed" && row.status != "done" {
-        return Err(ApiError::new(StatusCode::CONFLICT, "this video is already being analyzed"));
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this video is already being analyzed",
+        ));
     }
     db::set_status(&state.db, &id, "queued").await?;
     let _ = state.queue.send(id.clone());
@@ -256,6 +278,7 @@ async fn delete_video(
 ) -> ApiResult<StatusCode> {
     let row = find(&state, &id).await?;
     db::delete(&state.db, &id).await?;
+    let _ = db::delete_export(&state.db, &id).await;
     let _ = tokio::fs::remove_file(&row.stored_path).await;
     let _ = tokio::fs::remove_dir_all(state.cfg.data_dir.join("jobs").join(&id)).await;
     Ok(StatusCode::NO_CONTENT)
@@ -291,17 +314,15 @@ async fn download_captions(
         "srt" => (captions::to_srt(&result.segments), "application/x-subrip"),
         "vtt" => (captions::to_vtt(&result.segments), "text/vtt"),
         "txt" => (result.text.clone(), "text/plain"),
-        _ => return Err(ApiError::new(StatusCode::NOT_FOUND, "format must be srt, vtt or txt")),
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "format must be srt, vtt or txt",
+            ))
+        }
     };
 
-    let stem: String = FsPath::new(&row.filename)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let stem = if stem.trim_matches('_').is_empty() { "captions".to_string() } else { stem };
+    let stem = download_stem(&row.filename);
     let disposition = format!("attachment; filename=\"{stem}.{format}\"");
 
     let mut res = body.into_response();
@@ -314,4 +335,146 @@ async fn download_captions(
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(res)
+}
+
+#[derive(serde::Deserialize)]
+struct ExportRequest {
+    mode: String,
+}
+
+/// `POST /api/videos/{id}/export` with `{ "mode": "burned" | "soft" }`.
+async fn start_export(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ExportRequest>,
+) -> ApiResult<(StatusCode, Json<ExportDto>)> {
+    let mode = body.mode.trim().to_ascii_lowercase();
+    if !export::valid_mode(&mode) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "mode must be \"burned\" or \"soft\"",
+        ));
+    }
+    let row = find(&state, &id).await?;
+    if row.status != "done" {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "analysis is not finished yet",
+        ));
+    }
+    let result: AnalysisResult = row
+        .result_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "analysis is not finished yet"))?;
+    if result
+        .segments
+        .iter()
+        .all(|segment| segment.text.trim().is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this video has no captions to export",
+        ));
+    }
+    if let Some(current) = db::get_export(&state.db, &id).await? {
+        let running = current.status == "queued" || current.status == "rendering";
+        if running && current.mode == mode {
+            return Ok((StatusCode::OK, Json(ExportDto::from_row(current))));
+        }
+        if running {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "an export is already running — wait for it to finish",
+            ));
+        }
+    }
+
+    let export = db::upsert_export(&state.db, &id, &mode).await?;
+    let _ = state.export_queue.send(id);
+    Ok((StatusCode::ACCEPTED, Json(ExportDto::from_row(export))))
+}
+
+/// `GET /api/videos/{id}/export`
+async fn get_export(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ExportDto>> {
+    let _ = find(&state, &id).await?;
+    let export = db::get_export(&state.db, &id).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no captioned video has been exported yet",
+        )
+    })?;
+    Ok(Json(ExportDto::from_row(export)))
+}
+
+/// `GET /api/videos/{id}/export/file`
+async fn download_export(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Request,
+) -> ApiResult<Response> {
+    let row = find(&state, &id).await?;
+    let export = db::get_export(&state.db, &id).await?.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no captioned video has been exported yet",
+        )
+    })?;
+    if export.status != "done" {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the captioned video is not ready yet",
+        ));
+    }
+    let path = export
+        .output_path
+        .filter(|path| FsPath::new(path).is_file())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "the exported file is missing — export it again",
+            )
+        })?;
+
+    let mut res = ServeFile::new(&path)
+        .oneshot(req)
+        .await
+        .map_err(|e| match e {})?;
+    let label = if export.mode == MODE_SOFT {
+        "soft-captions"
+    } else {
+        "burned-captions"
+    };
+    let disposition = format!(
+        "attachment; filename=\"{}-{label}.mp4\"",
+        download_stem(&row.filename)
+    );
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        res.headers_mut().insert(header::CONTENT_DISPOSITION, value);
+    }
+    Ok(res.map(Body::new))
+}
+
+fn download_stem(filename: &str) -> String {
+    let stem: String = FsPath::new(filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if stem.trim_matches('_').is_empty() {
+        "captions".to_string()
+    } else {
+        stem
+    }
 }

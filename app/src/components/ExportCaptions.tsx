@@ -120,7 +120,9 @@ export default function ExportCaptions({ videoId, language }: Props) {
       )}
       {error && <p className="error-text">{error}</p>}
       {language === "km" && mode === "burned" && (
-        <p className="muted">Burned-in Khmer text uses Noto Sans Khmer when that font is installed.</p>
+        <p className="muted">
+          Burned-in Khmer text uses Khmer OS Battambang when that font is installed.
+        </p>
       )}
     </div>
   );

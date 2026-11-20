@@ -173,6 +173,7 @@ The desktop app keeps its data in `%APPDATA%\com.automate.videotext`.
 | `FFMPEG_PATH`, `FFPROBE_PATH` | found on PATH | Where to find ffmpeg and ffprobe |
 | `WHISPER_BIN` | `tools/whisper/whisper-cli` (`.exe` on Windows) | Where to find whisper.cpp |
 | `WHISPER_MODEL` | best `ggml-*.bin` in `tools/models` | Speech model. English-only files such as `ggml-base.en.bin` are included |
+| `CAPTION_FONT_KM` | Khmer OS Battambang, then Siemreap, then Noto Sans Khmer | Burned-in Khmer font. Set a family name (`Khmer OS Battambang`) or a `.ttf` path |
 
 ## API
 
@@ -206,7 +207,8 @@ npm test     # Rust unit tests for captions and speed analysis
 
 - **Speed**: transcription runs on the CPU. With the `base` model, a 10-minute video takes roughly 1–3 minutes on a modern PC. Larger models are more accurate but slower.
 - **Khmer, Thai and Chinese**: these languages are written without spaces between words, so the word count, and therefore words per minute, comes out lower than the true value. Transcripts and captions are not affected. Use `large-v3-turbo` for the best Khmer accuracy.
-- **Captioned video**: from a finished video, choose **Burned-in** or **Soft subtitles**. Burned-in captions are white with a dark outline, centered at the bottom, and scaled to the picture height. Soft subtitles are an MP4 subtitle track (`mov_text`) that players can toggle. Long lines are split into short cues (about two lines, 42 characters each). For Khmer, burned-in text uses **Noto Sans Khmer** when that font is installed (on Debian/Ubuntu, `fonts-noto-core` includes `NotoSansKhmer-Regular.ttf`).
+- **Captioned video**: from a finished video, choose **Burned-in** or **Soft subtitles**. Burned-in captions are white, centered at the bottom, and scaled to the picture height (a dark outline, or for Khmer an opaque black box). Soft subtitles are an MP4 subtitle track (`mov_text`) that players can toggle. Long lines are split into short cues (about two lines, 42 characters each; Khmer stays nearer 30–35 characters so a coeng cluster is not cut in half).
+- **Khmer burned-in font**: the default face is **Khmer OS Battambang** (regular weight — bold muddies the vowels). On Debian and Ubuntu install it with `sudo apt install fonts-khmeros` (`/usr/share/fonts/truetype/khmeros/KhmerOSbattambang.ttf`). On Windows put `KhmerOSbattambang.ttf` in `C:\Windows\Fonts`, and on macOS in `~/Library/Fonts` or `/Library/Fonts`. If Battambang is missing, the engine tries **Khmer OS Siemreap**, then **Noto Sans Khmer**, then the default font, and logs which one it used. Override the choice with `CAPTION_FONT_KM` (a family name or a `.ttf` path).
 - **Security**: the server has no login yet. It listens only on `127.0.0.1` by default. Add accounts before exposing it to the internet.
 
 ## Roadmap

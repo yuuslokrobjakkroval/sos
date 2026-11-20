@@ -43,8 +43,11 @@ macro_rules! args {
 
 /// A font that covers the caption language, plus the directory ffmpeg should scan.
 pub(crate) struct CaptionFont {
-    pub family: &'static str,
+    /// Family passed to `force_style`. `None` keeps ffmpeg's default face.
+    pub family: Option<String>,
     pub fonts_dir: Option<PathBuf>,
+    /// Opaque black box and the Khmer OS metrics, scaled from 1280×720.
+    pub khmer: bool,
 }
 
 pub fn spawn_worker(state: AppState, mut rx: mpsc::UnboundedReceiver<String>) {
@@ -115,7 +118,12 @@ async fn render(state: &AppState, video_id: &str, job: &ExportRow) -> anyhow::Re
     let work = state.cfg.data_dir.join("jobs").join(video_id);
     tokio::fs::create_dir_all(&work).await?;
     let words = load_word_timings(&work.join("transcript.json")).await;
-    let cues = cues::readable_cues(&result.segments, &words);
+    let language = export_language(&video.language, result.language.as_deref());
+    let cues = if is_khmer(&language) {
+        cues::readable_cues_with(&result.segments, &words, cues::CueLayout::khmer())
+    } else {
+        cues::readable_cues(&result.segments, &words)
+    };
     if cues.is_empty() {
         bail!("this video has no captions to export");
     }
@@ -128,10 +136,10 @@ async fn render(state: &AppState, video_id: &str, job: &ExportRow) -> anyhow::Re
     let output = work.join(format!("captioned-{}.mp4", job.mode));
     let _ = tokio::fs::remove_file(&part).await;
 
-    let language = export_language(&video.language, result.language.as_deref());
     let render_result = match job.mode.as_str() {
         MODE_BURNED => {
-            let font = font_for_language(&language);
+            let font = is_khmer(&language)
+                .then(|| khmer_caption_font(state.cfg.caption_font_km.as_deref()));
             let filter = burned_subtitle_filter(
                 &srt_path,
                 font.as_ref(),
@@ -491,30 +499,67 @@ pub(crate) fn escape_subtitles_filter_path(path: &str) -> String {
 struct CaptionMetrics {
     font_size: u32,
     margin_v: u32,
+    margin_h: u32,
     outline: u32,
     frame: Option<(u32, u32)>,
+    /// White text on an opaque black box, sized for Khmer OS faces.
+    khmer_box: bool,
 }
 
-/// Font size, outline and bottom margin.
+/// Reference burned-in style for Khmer OS fonts at PlayRes 1280×720.
 ///
-/// With a known frame size, `original_size` makes these values pixels, scaled
-/// to the video height (about 4.5% for the type). Without one, the numbers are
-/// in the SRT default PlayRes of 288 and libass scales them with the frame.
-fn caption_metrics(width: Option<u32>, height: Option<u32>) -> CaptionMetrics {
+/// Those faces have a line height of about 1.85 em, so size 40 with 12 px of
+/// box padding and a 72 px bottom margin keeps two lines readable. Other
+/// frame heights scale these numbers by `height / 720`.
+const KHMER_REF_HEIGHT: f64 = 720.0;
+const KHMER_REF_FONT: f64 = 40.0;
+const KHMER_REF_OUTLINE: f64 = 12.0;
+const KHMER_REF_MARGIN_V: f64 = 72.0;
+const KHMER_REF_MARGIN_H: f64 = 80.0;
+
+/// Font size, outline and margins.
+///
+/// Khmer uses the 720p box above, scaled to the frame. Other languages use a
+/// white face with a dark outline, about 4.5% of the video height. With a
+/// known frame size, `original_size` makes the numbers pixels.
+fn caption_metrics(width: Option<u32>, height: Option<u32>, khmer: bool) -> CaptionMetrics {
+    if khmer {
+        let (w, h) = match (width, height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+            _ => (1280, 720),
+        };
+        let scale = h as f64 / KHMER_REF_HEIGHT;
+        return CaptionMetrics {
+            font_size: scale_ref(KHMER_REF_FONT, scale),
+            outline: scale_ref(KHMER_REF_OUTLINE, scale),
+            margin_v: scale_ref(KHMER_REF_MARGIN_V, scale),
+            margin_h: scale_ref(KHMER_REF_MARGIN_H, scale),
+            frame: Some((w, h)),
+            khmer_box: true,
+        };
+    }
     match (width, height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => CaptionMetrics {
             font_size: scale_px(h, 0.045, 16, 160),
             margin_v: scale_px(h, 0.055, 8, 180),
+            margin_h: 0,
             outline: scale_px(h, 1.0 / 280.0, 2, 8),
             frame: Some((w, h)),
+            khmer_box: false,
         },
         _ => CaptionMetrics {
             font_size: 18,
             margin_v: 20,
+            margin_h: 0,
             outline: 2,
             frame: None,
+            khmer_box: false,
         },
     }
+}
+
+fn scale_ref(reference: f64, scale: f64) -> u32 {
+    (reference * scale).round().max(1.0) as u32
 }
 
 fn scale_px(height: u32, ratio: f64, min: u32, max: u32) -> u32 {
@@ -525,24 +570,33 @@ fn scale_px(height: u32, ratio: f64, min: u32, max: u32) -> u32 {
 
 fn force_style(font: Option<&CaptionFont>, metrics: &CaptionMetrics) -> String {
     let mut style = String::new();
-    if let Some(font) = font {
-        style.push_str(&format!("FontName={},", font.family));
+    if let Some(family) = font.and_then(|font| font.family.as_deref()) {
+        style.push_str(&format!("FontName={family},"));
     }
-    style.push_str(&format!(
-        "FontSize={},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline={},Shadow=0,Alignment=2,MarginV={}",
-        metrics.font_size, metrics.outline, metrics.margin_v
-    ));
+    if metrics.khmer_box {
+        // Bold=0: Khmer OS faux-bold muddies coengs and vowel signs.
+        // BorderStyle=3 is an opaque box; Outline is its padding.
+        style.push_str(&format!(
+            "Bold=0,FontSize={},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,BorderStyle=3,Outline={},Shadow=0,Alignment=2,MarginL={},MarginR={},MarginV={}",
+            metrics.font_size, metrics.outline, metrics.margin_h, metrics.margin_h, metrics.margin_v
+        ));
+    } else {
+        style.push_str(&format!(
+            "FontSize={},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,Outline={},Shadow=0,Alignment=2,MarginV={}",
+            metrics.font_size, metrics.outline, metrics.margin_v
+        ));
+    }
     style
 }
 
-/// `subtitles=...` filter: white text, black outline, bottom center.
+/// `subtitles=...` filter: white text, bottom center. Khmer uses a black box.
 pub(crate) fn burned_subtitle_filter(
     srt: &Path,
     font: Option<&CaptionFont>,
     width: Option<u32>,
     height: Option<u32>,
 ) -> String {
-    let metrics = caption_metrics(width, height);
+    let metrics = caption_metrics(width, height, font.is_some_and(|font| font.khmer));
     let mut filter = format!(
         "subtitles={}",
         escape_subtitles_filter_path(&srt.to_string_lossy())
@@ -560,16 +614,266 @@ pub(crate) fn burned_subtitle_filter(
     filter
 }
 
-pub(crate) fn font_for_language(language: &str) -> Option<CaptionFont> {
-    if !is_khmer(language) {
+/// Burned-in font for Khmer. Logs which face was chosen.
+fn khmer_caption_font(override_value: Option<&str>) -> CaptionFont {
+    match resolve_khmer_font(override_value, &default_font_roots(), true) {
+        Some(choice) => {
+            let family = style_family(&choice.family);
+            if family.is_none() {
+                tracing::warn!(
+                    name = %choice.family,
+                    "Khmer font name cannot be passed to ffmpeg; not forcing FontName"
+                );
+            }
+            tracing::info!(
+                family = %choice.family,
+                dir = ?choice.fonts_dir,
+                font = choice.which,
+                "Khmer burned-in font"
+            );
+            CaptionFont {
+                family,
+                fonts_dir: choice.fonts_dir,
+                khmer: true,
+            }
+        }
+        None => {
+            tracing::info!(
+                "no Khmer OS Battambang, Khmer OS Siemreap, or Noto Sans Khmer font found; using the default font"
+            );
+            CaptionFont {
+                family: None,
+                fonts_dir: None,
+                khmer: true,
+            }
+        }
+    }
+}
+
+struct FontChoice {
+    family: String,
+    fonts_dir: Option<PathBuf>,
+    which: &'static str,
+}
+
+struct KhmerFace {
+    family: &'static str,
+    files: &'static [&'static str],
+    stem: &'static str,
+}
+
+/// Preference order for burned-in Khmer: Battambang, then Siemreap, then Noto.
+const KHMER_FONTS: &[KhmerFace] = &[
+    KhmerFace {
+        family: "Khmer OS Battambang",
+        files: &["KhmerOSbattambang.ttf", "KhmerOSBattambang.ttf"],
+        stem: "khmerosbattambang",
+    },
+    KhmerFace {
+        family: "Khmer OS Siemreap",
+        files: &["KhmerOSsiemreap.ttf", "KhmerOSSiemreap.ttf"],
+        stem: "khmerosiemreap",
+    },
+    KhmerFace {
+        family: "Noto Sans Khmer",
+        files: &[
+            "NotoSansKhmer-Regular.ttf",
+            "NotoSansKhmer-Regular.otf",
+            "NotoSansKhmer.ttf",
+        ],
+        stem: "notosanskhmer",
+    },
+];
+
+/// `override_value` is `CAPTION_FONT_KM`: a font file path, or a family name.
+/// `fontconfig` asks `fc-list` / `fc-query` as well as the known directories.
+fn resolve_khmer_font(
+    override_value: Option<&str>,
+    roots: &[PathBuf],
+    fontconfig: bool,
+) -> Option<FontChoice> {
+    if let Some(value) = override_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if looks_like_font_path(value) {
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                let family = font_family_of_file(&path, fontconfig);
+                return Some(FontChoice {
+                    family,
+                    fonts_dir: path.parent().map(Path::to_path_buf),
+                    which: "override",
+                });
+            }
+            tracing::warn!(
+                path = %value,
+                "CAPTION_FONT_KM file was not found; trying the built-in Khmer fonts"
+            );
+        } else {
+            let found = find_named_font(value, roots, fontconfig);
+            return Some(FontChoice {
+                family: value.to_string(),
+                fonts_dir: found.and_then(|path| path.parent().map(Path::to_path_buf)),
+                which: "override",
+            });
+        }
+    }
+
+    for face in KHMER_FONTS {
+        if let Some(path) = find_face(face, roots, fontconfig) {
+            return Some(FontChoice {
+                family: face.family.to_string(),
+                fonts_dir: path.parent().map(Path::to_path_buf),
+                which: face.family,
+            });
+        }
+    }
+    None
+}
+
+fn looks_like_font_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    value.contains('/')
+        || value.contains('\\')
+        || lower.ends_with(".ttf")
+        || lower.ends_with(".otf")
+        || lower.ends_with(".ttc")
+}
+
+fn font_family_of_file(path: &Path, fontconfig: bool) -> String {
+    if let Some(family) = family_from_filename(path) {
+        return family;
+    }
+    if fontconfig {
+        if let Some(family) = fc_query_family(path) {
+            return family;
+        }
+    }
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Khmer OS Battambang".to_string())
+}
+
+fn family_from_filename(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.contains("battambang") {
+        Some("Khmer OS Battambang".to_string())
+    } else if name.contains("siemreap") {
+        Some("Khmer OS Siemreap".to_string())
+    } else if name.contains("notosanskhmer") {
+        Some("Noto Sans Khmer".to_string())
+    } else {
+        None
+    }
+}
+
+/// Drop characters that would break ffmpeg's `force_style` list.
+fn style_family(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed
+            .chars()
+            .any(|c| matches!(c, ',' | '\'' | ':' | '\\'))
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn find_named_font(family: &str, roots: &[PathBuf], fontconfig: bool) -> Option<PathBuf> {
+    if let Some(face) = KHMER_FONTS
+        .iter()
+        .find(|face| face.family.eq_ignore_ascii_case(family))
+    {
+        if let Some(path) = find_face(face, roots, fontconfig) {
+            return Some(path);
+        }
+    }
+    if fontconfig {
+        fontconfig_file(family)
+    } else {
+        None
+    }
+}
+
+fn find_face(face: &KhmerFace, roots: &[PathBuf], fontconfig: bool) -> Option<PathBuf> {
+    if let Some(path) = known_font_file(face, roots) {
+        return Some(path);
+    }
+    if fontconfig {
+        if let Some(path) = fontconfig_file(face.family) {
+            return Some(path);
+        }
+    }
+    let mut found = Vec::new();
+    for root in roots {
+        collect_fonts(root, face.stem, &mut found, 0);
+    }
+    found.sort_by_key(|path| font_rank(path));
+    found.into_iter().next()
+}
+
+fn known_font_file(face: &KhmerFace, roots: &[PathBuf]) -> Option<PathBuf> {
+    const SUBDIRS: &[&str] = &[
+        "truetype/khmeros",
+        "khmeros",
+        "truetype/noto",
+        "opentype/noto",
+        "noto",
+        "truetype",
+        "TTF",
+        "opentype",
+        "",
+    ];
+    for root in roots {
+        for sub in SUBDIRS {
+            for file in face.files {
+                let path = root.join(sub).join(file);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn fontconfig_file(family: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("fc-list")
+        .arg(family)
+        .arg("-f")
+        .arg("%{file}\n")
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    let fonts_dir = find_khmer_font(&default_font_roots())
-        .and_then(|path| path.parent().map(Path::to_path_buf));
-    Some(CaptionFont {
-        family: "Noto Sans Khmer",
-        fonts_dir,
-    })
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut paths: Vec<PathBuf> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort_by_key(|path| font_rank(path));
+    paths.into_iter().next()
+}
+
+fn fc_query_family(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("fc-query")
+        .arg("-f")
+        .arg("%{family[0]}\n")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 fn is_khmer(language: &str) -> bool {
@@ -601,38 +905,6 @@ fn default_font_roots() -> Vec<PathBuf> {
         roots.push(PathBuf::from(r"C:\Windows\Fonts"));
     }
     roots
-}
-
-fn find_khmer_font(roots: &[PathBuf]) -> Option<PathBuf> {
-    const NAMES: &[&str] = &[
-        "NotoSansKhmer-Regular.ttf",
-        "NotoSansKhmer-Regular.otf",
-        "NotoSansKhmer.ttf",
-    ];
-    const SUBS: &[&str] = &[
-        "",
-        "truetype/noto",
-        "opentype/noto",
-        "noto",
-        "TTF",
-        "truetype",
-    ];
-    for root in roots {
-        for sub in SUBS {
-            for name in NAMES {
-                let path = root.join(sub).join(name);
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    let mut found = Vec::new();
-    for root in roots {
-        collect_fonts(root, "notosanskhmer", &mut found, 0);
-    }
-    found.sort_by_key(|path| font_rank(path));
-    found.into_iter().next()
 }
 
 fn collect_fonts(dir: &Path, stem: &str, found: &mut Vec<PathBuf>, depth: u32) {
@@ -737,8 +1009,9 @@ mod tests {
     fn burned_filter_uses_a_readable_scaled_style() {
         let path = Path::new("/tmp/a:b's,dir[1]/cap.srt");
         let font = CaptionFont {
-            family: "Noto Sans Khmer",
+            family: Some("Noto Sans Khmer".to_string()),
             fonts_dir: Some(PathBuf::from("/usr/share/fonts/truetype/noto")),
+            khmer: false,
         };
         let filter = burned_subtitle_filter(path, Some(&font), Some(1920), Some(1080));
         let escaped = escape_subtitles_filter_path("/tmp/a:b's,dir[1]/cap.srt");
@@ -780,13 +1053,118 @@ mod tests {
     }
 
     #[test]
-    fn khmer_requests_noto_and_other_languages_do_not() {
-        let font = font_for_language("km").expect("khmer");
-        assert_eq!(font.family, "Noto Sans Khmer");
-        assert!(font_for_language("KM").is_some());
-        assert!(font_for_language("km-KH").is_some());
-        assert!(font_for_language("en").is_none());
-        assert!(font_for_language("auto").is_none());
+    fn khmer_box_matches_the_720p_reference_and_scales() {
+        let font = CaptionFont {
+            family: Some("Khmer OS Battambang".to_string()),
+            fonts_dir: Some(PathBuf::from("/usr/share/fonts/truetype/khmeros")),
+            khmer: true,
+        };
+        let filter = burned_subtitle_filter(
+            Path::new("/tmp/cap.srt"),
+            Some(&font),
+            Some(1280),
+            Some(720),
+        );
+        assert!(filter.contains("original_size=1280x720"));
+        assert!(filter.contains("fontsdir=/usr/share/fonts/truetype/khmeros"));
+        assert!(filter.contains("FontName=Khmer OS Battambang"));
+        assert!(filter.contains("Bold=0"));
+        assert!(filter.contains("FontSize=40"));
+        assert!(filter.contains("Outline=12"));
+        assert!(filter.contains("MarginV=72"));
+        assert!(filter.contains("MarginL=80"));
+        assert!(filter.contains("MarginR=80"));
+        assert!(filter.contains("PrimaryColour=&H00FFFFFF"));
+        assert!(filter.contains("BackColour=&H00000000"));
+        assert!(filter.contains("BorderStyle=3"));
+        assert!(filter.contains("Alignment=2"));
+
+        // 1080 / 720 = 1.5, so every metric grows by that factor.
+        let hd = burned_subtitle_filter(
+            Path::new("/tmp/cap.srt"),
+            Some(&font),
+            Some(1920),
+            Some(1080),
+        );
+        assert!(hd.contains("FontSize=60"));
+        assert!(hd.contains("Outline=18"));
+        assert!(hd.contains("MarginV=108"));
+        assert!(hd.contains("MarginL=120"));
+        assert!(hd.contains("MarginR=120"));
+        assert!(hd.contains("original_size=1920x1080"));
+    }
+
+    #[test]
+    fn khmer_font_falls_back_and_honours_an_override() {
+        assert!(is_khmer("km"));
+        assert!(is_khmer("KM"));
+        assert!(is_khmer("km-KH"));
+        assert!(!is_khmer("en"));
+        assert!(!is_khmer("auto"));
+
+        let root = TempDir::new();
+        let khmeros = root.0.join("truetype").join("khmeros");
+        let noto = root.0.join("truetype").join("noto");
+        fs::create_dir_all(&khmeros).unwrap();
+        fs::create_dir_all(&noto).unwrap();
+        fs::write(khmeros.join("KhmerOSbattambang.ttf"), b"b").unwrap();
+        fs::write(khmeros.join("KhmerOSsiemreap.ttf"), b"s").unwrap();
+        fs::write(noto.join("NotoSansKhmer-Regular.ttf"), b"n").unwrap();
+        fs::write(noto.join("NotoSansKhmer-Bold.ttf"), b"bold").unwrap();
+        let roots = [root.0.clone()];
+
+        let battambang = resolve_khmer_font(None, &roots, false).unwrap();
+        assert_eq!(battambang.family, "Khmer OS Battambang");
+        assert_eq!(battambang.which, "Khmer OS Battambang");
+        assert_eq!(
+            battambang.fonts_dir.unwrap().file_name().unwrap(),
+            "khmeros"
+        );
+
+        fs::remove_file(khmeros.join("KhmerOSbattambang.ttf")).unwrap();
+        let siemreap = resolve_khmer_font(None, &roots, false).unwrap();
+        assert_eq!(siemreap.family, "Khmer OS Siemreap");
+        assert_eq!(siemreap.fonts_dir.unwrap().file_name().unwrap(), "khmeros");
+
+        fs::remove_file(khmeros.join("KhmerOSsiemreap.ttf")).unwrap();
+        let noto_font = resolve_khmer_font(None, &roots, false).unwrap();
+        assert_eq!(noto_font.family, "Noto Sans Khmer");
+        assert_eq!(
+            noto_font.fonts_dir.as_ref().unwrap().file_name().unwrap(),
+            "noto"
+        );
+
+        fs::remove_file(noto.join("NotoSansKhmer-Regular.ttf")).unwrap();
+        let bold_only = resolve_khmer_font(None, &roots, false).unwrap();
+        assert_eq!(bold_only.family, "Noto Sans Khmer");
+        assert!(bold_only
+            .fonts_dir
+            .unwrap()
+            .join("NotoSansKhmer-Bold.ttf")
+            .is_file());
+
+        fs::remove_file(noto.join("NotoSansKhmer-Bold.ttf")).unwrap();
+        assert!(resolve_khmer_font(None, &roots, false).is_none());
+
+        let custom = root.0.join("MyKhmer.ttf");
+        fs::write(&custom, b"c").unwrap();
+        let overridden = resolve_khmer_font(Some(custom.to_str().unwrap()), &roots, false).unwrap();
+        assert_eq!(overridden.which, "override");
+        assert_eq!(overridden.fonts_dir.unwrap(), root.0);
+        // The file name is not a known face, so the family is the file stem.
+        assert_eq!(overridden.family, "MyKhmer");
+
+        fs::write(khmeros.join("KhmerOSbattambang.ttf"), b"b").unwrap();
+        let named = resolve_khmer_font(Some("Khmer OS Siemreap"), &roots, false).unwrap();
+        // The family is forced even when that file is absent; Battambang is not substituted.
+        assert_eq!(named.family, "Khmer OS Siemreap");
+        assert_eq!(named.which, "override");
+        assert!(named.fonts_dir.is_none());
+
+        let missing = root.0.join("missing.ttf");
+        let fell_back = resolve_khmer_font(Some(missing.to_str().unwrap()), &roots, false).unwrap();
+        assert_eq!(fell_back.family, "Khmer OS Battambang");
+        assert_eq!(fell_back.which, "Khmer OS Battambang");
     }
 
     struct TempDir(PathBuf);
@@ -854,10 +1232,11 @@ mod tests {
         assert!(made.success(), "could not make a sample video");
 
         let font = CaptionFont {
-            family: "Noto Sans Khmer",
+            family: Some("Noto Sans Khmer".to_string()),
             fonts_dir: Path::new("/usr/share/fonts/truetype/noto")
                 .is_dir()
                 .then(|| PathBuf::from("/usr/share/fonts/truetype/noto")),
+            khmer: false,
         };
         let filter = burned_subtitle_filter(&srt, Some(&font), Some(320), Some(180));
         let burned = std::process::Command::new(&ffmpeg)
@@ -873,20 +1252,5 @@ mod tests {
             String::from_utf8_lossy(&burned.stderr)
         );
         assert!(output.is_file());
-    }
-
-    #[test]
-    fn font_search_prefers_regular_and_finds_nested_files() {
-        let root = TempDir::new();
-        fs::write(root.0.join("NotoSansKhmer-Regular.ttf"), b"r").unwrap();
-        let nested = root.0.join("truetype").join("noto");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("NotoSansKhmer-Bold.ttf"), b"b").unwrap();
-        let found = find_khmer_font(std::slice::from_ref(&root.0)).unwrap();
-        assert_eq!(found.file_name().unwrap(), "NotoSansKhmer-Regular.ttf");
-
-        fs::remove_file(root.0.join("NotoSansKhmer-Regular.ttf")).unwrap();
-        let found = find_khmer_font(std::slice::from_ref(&root.0)).unwrap();
-        assert_eq!(found.file_name().unwrap(), "NotoSansKhmer-Bold.ttf");
     }
 }

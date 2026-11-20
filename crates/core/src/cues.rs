@@ -1,9 +1,11 @@
 //! Split transcript segments into short, readable caption cues for export.
 //!
 //! Playback captions can be a whole sentence. Burned-in and soft subtitles are
-//! easier to read as at most two lines of about 42 characters, on screen for
-//! roughly one to seven seconds. Timing is taken from whisper word tokens when
-//! the JSON has them, and otherwise shared across the words by their length.
+//! easier to read as at most two lines of about 42 characters (about 30–35 for
+//! Khmer), on screen for roughly one to seven seconds. Timing is taken from
+//! whisper word tokens when the JSON has them, and otherwise shared across the
+//! words by their length. Khmer is split on clusters so a coeng and its
+//! subscript stay on the same line.
 
 use crate::{
     analysis::{self, WhisperJson},
@@ -21,9 +23,33 @@ pub(crate) struct TimedWord {
 }
 
 const MAX_LINE_CHARS: usize = 42;
+/// Khmer OS faces are wide, so a full line stays inside about 30–35 characters.
+const KHMER_LINE_CHARS: usize = 34;
 const MAX_LINES: usize = 2;
 const MIN_CUE_MS: i64 = 1_000;
 const MAX_CUE_MS: i64 = 7_000;
+/// U+17D2, the sign that pulls the next consonant down into a subscript.
+const KHMER_COENG: char = '\u{17D2}';
+
+/// How long a caption line may be. Latin and Khmer use different limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CueLayout {
+    pub max_line_chars: usize,
+}
+
+impl CueLayout {
+    pub(crate) fn latin() -> Self {
+        Self {
+            max_line_chars: MAX_LINE_CHARS,
+        }
+    }
+
+    pub(crate) fn khmer() -> Self {
+        Self {
+            max_line_chars: KHMER_LINE_CHARS,
+        }
+    }
+}
 
 /// Words reconstructed from whisper.cpp's full JSON (`-ojf`), in time order.
 ///
@@ -71,8 +97,17 @@ fn is_spoken_token(text: &str) -> bool {
     !trimmed.is_empty() && !trimmed.starts_with('[') && !trimmed.starts_with('<')
 }
 
-/// Cues ready to write as SRT. `words` may be empty.
+/// Cues ready to write as SRT, using the Latin line length. `words` may be empty.
 pub(crate) fn readable_cues(segments: &[Segment], words: &[TimedWord]) -> Vec<Segment> {
+    readable_cues_with(segments, words, CueLayout::latin())
+}
+
+/// Cues ready to write as SRT. `words` may be empty.
+pub(crate) fn readable_cues_with(
+    segments: &[Segment],
+    words: &[TimedWord],
+    layout: CueLayout,
+) -> Vec<Segment> {
     let mut used = vec![false; words.len()];
     let mut cues = Vec::new();
     for segment in segments {
@@ -83,13 +118,13 @@ pub(crate) fn readable_cues(segments: &[Segment], words: &[TimedWord]) -> Vec<Se
         let mut pieces = words_inside(segment, words, &mut used);
         if pieces.is_empty() {
             let end_ms = segment.end_ms.max(segment.start_ms);
-            pieces = synthesize(text, segment.start_ms.max(0), end_ms);
+            pieces = synthesize(text, segment.start_ms.max(0), end_ms, layout);
         }
         if pieces.is_empty() {
             continue;
         }
-        for group in pack(pieces) {
-            if let Some(cue) = cue_from(&group) {
+        for group in pack(pieces, layout) {
+            if let Some(cue) = cue_from(&group, layout.max_line_chars) {
                 cues.push(cue);
             }
         }
@@ -118,7 +153,7 @@ fn words_inside(segment: &Segment, words: &[TimedWord], used: &mut [bool]) -> Ve
 /// Share `start_ms..end_ms` across words in proportion to how long they are.
 /// A caption with no spaces (Khmer, Thai, Chinese) is cut into character
 /// groups that each fit on one line and last about seven seconds at most.
-fn synthesize(text: &str, start_ms: i64, end_ms: i64) -> Vec<TimedWord> {
+fn synthesize(text: &str, start_ms: i64, end_ms: i64, layout: CueLayout) -> Vec<TimedWord> {
     let parts: Vec<&str> = text.split_whitespace().collect();
     if parts.is_empty() {
         return Vec::new();
@@ -128,7 +163,7 @@ fn synthesize(text: &str, start_ms: i64, end_ms: i64) -> Vec<TimedWord> {
         let only = parts[0];
         let chars = only.chars().count();
         let span = (end_ms - start_ms).max(1);
-        let limit = chunk_limit(chars, span);
+        let limit = chunk_limit(chars, span, layout.max_line_chars);
         if chars > limit {
             return char_chunks(only, start_ms, end_ms, limit, false);
         }
@@ -155,18 +190,18 @@ fn synthesize(text: &str, start_ms: i64, end_ms: i64) -> Vec<TimedWord> {
             end_ms: word_end,
             gap_before: index > 0,
         };
-        words.extend(split_overlong(word));
+        words.extend(split_overlong(word, layout));
     }
     words
 }
 
-fn split_overlong(word: TimedWord) -> Vec<TimedWord> {
+fn split_overlong(word: TimedWord, layout: CueLayout) -> Vec<TimedWord> {
     let count = word.text.chars().count();
-    if count <= MAX_LINE_CHARS {
+    if count <= layout.max_line_chars {
         return vec![word];
     }
     let span = (word.end_ms - word.start_ms).max(1);
-    let limit = chunk_limit(count, span);
+    let limit = chunk_limit(count, span, layout.max_line_chars);
     char_chunks(
         &word.text,
         word.start_ms,
@@ -178,15 +213,16 @@ fn split_overlong(word: TimedWord) -> Vec<TimedWord> {
 
 /// Largest character group that fits on a line and, when the whole caption is
 /// long, does not itself run past the maximum cue length.
-fn chunk_limit(chars: usize, span_ms: i64) -> usize {
+fn chunk_limit(chars: usize, span_ms: i64, max_line_chars: usize) -> usize {
     if chars == 0 {
         return 1;
     }
+    let cap = max_line_chars.max(1);
     if span_ms > MAX_CUE_MS {
         let by_time = (chars as i128) * (MAX_CUE_MS as i128) / (span_ms as i128);
-        (by_time as usize).clamp(1, MAX_LINE_CHARS)
+        (by_time as usize).clamp(1, cap)
     } else {
-        MAX_LINE_CHARS
+        cap
     }
 }
 
@@ -197,33 +233,90 @@ fn char_chunks(
     limit: usize,
     first_gap: bool,
 ) -> Vec<TimedWord> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
+    let groups = group_atoms(text, limit.max(1));
+    if groups.is_empty() {
         return Vec::new();
     }
-    let limit = limit.max(1);
-    let total = chars.len();
+    let total = groups
+        .iter()
+        .map(|group| group.chars().count())
+        .sum::<usize>()
+        .max(1);
     let span = (end_ms - start_ms).max(0);
-    let mut words = Vec::new();
-    let mut offset = 0;
-    while offset < total {
-        let take = (total - offset).min(limit);
-        let piece: String = chars[offset..offset + take].iter().collect();
-        let word_start = start_ms + scale(span, offset, total);
-        offset += take;
-        let word_end = if offset == total {
-            end_ms.max(word_start)
-        } else {
-            (start_ms + scale(span, offset, total)).max(word_start)
-        };
-        words.push(TimedWord {
-            text: piece,
-            start_ms: word_start,
-            end_ms: word_end,
-            gap_before: first_gap && words.is_empty(),
-        });
+    let mut consumed = 0usize;
+    let last = groups.len().saturating_sub(1);
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, piece)| {
+            let weight = piece.chars().count().max(1);
+            let word_start = start_ms + scale(span, consumed, total);
+            consumed += weight;
+            let word_end = if index == last {
+                end_ms.max(word_start)
+            } else {
+                (start_ms + scale(span, consumed, total)).max(word_start)
+            };
+            TimedWord {
+                text: piece,
+                start_ms: word_start,
+                end_ms: word_end,
+                gap_before: first_gap && index == 0,
+            }
+        })
+        .collect()
+}
+
+/// Pieces of `text` no longer than `limit` characters, without cutting a Khmer
+/// coeng cluster. A cluster that is itself longer than `limit` stays whole.
+fn group_atoms(text: &str, limit: usize) -> Vec<String> {
+    let mut groups = Vec::new();
+    let mut current = String::new();
+    for atom in text_atoms(text) {
+        let count = atom.chars().count();
+        if !current.is_empty() && current.chars().count() + count > limit {
+            groups.push(std::mem::take(&mut current));
+        }
+        current.push_str(&atom);
     }
-    words
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+/// Unbreakable pieces. Latin letters are one character each. A Khmer base keeps
+/// its coeng subscripts and vowel signs.
+fn text_atoms(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut atoms = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let start = index;
+        index += 1;
+        while index < chars.len() && cluster_continues(chars[index]) {
+            if chars[index] == KHMER_COENG {
+                index += 1;
+                if index < chars.len() {
+                    index += 1;
+                }
+            } else {
+                index += 1;
+            }
+        }
+        atoms.push(chars[start..index].iter().collect());
+    }
+    atoms
+}
+
+fn cluster_continues(c: char) -> bool {
+    c == KHMER_COENG || is_khmer_mark(c) || c == '\u{200C}' || c == '\u{200D}'
+}
+
+/// Dependent vowels and signs. Coeng is handled on its own so the subscript
+/// consonant after it stays in the same cluster.
+fn is_khmer_mark(c: char) -> bool {
+    matches!(c, '\u{17B6}'..='\u{17D1}' | '\u{17D3}' | '\u{17DD}')
 }
 
 fn scale(span: i64, consumed: usize, total: usize) -> i64 {
@@ -233,14 +326,14 @@ fn scale(span: i64, consumed: usize, total: usize) -> i64 {
     ((span as i128) * (consumed as i128) / (total as i128)) as i64
 }
 
-fn pack(words: Vec<TimedWord>) -> Vec<Vec<TimedWord>> {
+fn pack(words: Vec<TimedWord>, layout: CueLayout) -> Vec<Vec<TimedWord>> {
     let mut cues: Vec<Vec<TimedWord>> = Vec::new();
     let mut index = 0;
     while index < words.len() {
         let mut end = index + 1;
         while end < words.len() {
             let candidate = &words[index..=end];
-            if !fits(candidate) || span(candidate) > MAX_CUE_MS {
+            if !fits(candidate, layout.max_line_chars) || span(candidate) > MAX_CUE_MS {
                 break;
             }
             end += 1;
@@ -248,13 +341,13 @@ fn pack(words: Vec<TimedWord>) -> Vec<Vec<TimedWord>> {
         cues.push(words[index..end].to_vec());
         index = end;
     }
-    balance_short_cues(&mut cues);
+    balance_short_cues(&mut cues, layout.max_line_chars);
     cues
 }
 
 /// Move a word from a full cue onto a following cue that is shorter than a
 /// second, when the result still fits on two lines and under seven seconds.
-fn balance_short_cues(cues: &mut [Vec<TimedWord>]) {
+fn balance_short_cues(cues: &mut [Vec<TimedWord>], max_line_chars: usize) {
     let mut index = 1;
     while index < cues.len() {
         if span(&cues[index]) >= MIN_CUE_MS || cues[index - 1].len() < 2 {
@@ -265,7 +358,10 @@ fn balance_short_cues(cues: &mut [Vec<TimedWord>]) {
         let mut trial = vec![word];
         trial.extend(cues[index].iter().cloned());
         let previous: Vec<TimedWord> = cues[index - 1][..cues[index - 1].len() - 1].to_vec();
-        if fits(&trial) && span(&trial) <= MAX_CUE_MS && span(&previous) >= MIN_CUE_MS {
+        if fits(&trial, max_line_chars)
+            && span(&trial) <= MAX_CUE_MS
+            && span(&previous) >= MIN_CUE_MS
+        {
             cues[index - 1].pop();
             cues[index] = trial;
             continue;
@@ -281,11 +377,11 @@ fn span(words: &[TimedWord]) -> i64 {
     }
 }
 
-fn fits(words: &[TimedWord]) -> bool {
-    wrap_lines(words).len() <= MAX_LINES
+fn fits(words: &[TimedWord], max_line_chars: usize) -> bool {
+    wrap_lines(words, max_line_chars).len() <= MAX_LINES
 }
 
-fn wrap_lines(words: &[TimedWord]) -> Vec<String> {
+fn wrap_lines(words: &[TimedWord], max_line_chars: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in words {
@@ -295,7 +391,7 @@ fn wrap_lines(words: &[TimedWord]) -> Vec<String> {
             " "
         };
         let extra = separator.chars().count() + word.text.chars().count();
-        if !current.is_empty() && current.chars().count() + extra > MAX_LINE_CHARS {
+        if !current.is_empty() && current.chars().count() + extra > max_line_chars {
             lines.push(std::mem::take(&mut current));
             current = word.text.clone();
         } else {
@@ -309,8 +405,8 @@ fn wrap_lines(words: &[TimedWord]) -> Vec<String> {
     lines
 }
 
-fn cue_from(words: &[TimedWord]) -> Option<Segment> {
-    let lines = wrap_lines(words);
+fn cue_from(words: &[TimedWord], max_line_chars: usize) -> Option<Segment> {
+    let lines = wrap_lines(words, max_line_chars);
     if lines.is_empty() {
         return None;
     }
@@ -508,5 +604,47 @@ mod tests {
         }"#;
         let whisper: WhisperJson = serde_json::from_str(bare).unwrap();
         assert!(words_from_whisper(&whisper).is_empty());
+    }
+
+    #[test]
+    fn khmer_clusters_stay_together_and_lines_stay_short() {
+        assert_eq!(text_atoms("ក្ខស"), vec!["ក្ខ".to_string(), "ស".to_string()]);
+        // សួ is a base plus a vowel; ស្តី is a base, coeng, subscript, and vowel.
+        assert_eq!(text_atoms("សួស្តី"), vec!["សួ".to_string(), "ស្តី".to_string()]);
+        // Two subscripts on one base are still one cluster.
+        assert_eq!(text_atoms("ក្ក្ខ"), vec!["ក្ក្ខ".to_string()]);
+
+        let cluster = "ក្ខ";
+        assert_eq!(cluster.chars().count(), 3);
+        let text = cluster.repeat(24);
+        let cues = readable_cues_with(&[seg(0, 4_000, &text)], &[], CueLayout::khmer());
+        assert!(cues.len() >= 2, "{cues:?}");
+        let rebuilt: String = cues
+            .iter()
+            .flat_map(|cue| cue.text.chars().filter(|c| *c != '\n'))
+            .collect();
+        assert_eq!(rebuilt, text);
+        for cue in &cues {
+            let lines: Vec<&str> = cue.text.split('\n').collect();
+            assert!(lines.len() <= 2, "{}", cue.text);
+            for line in lines {
+                assert!(
+                    line.chars().count() <= KHMER_LINE_CHARS || line == cluster,
+                    "{line} ({} chars)",
+                    line.chars().count()
+                );
+                assert!(!line.ends_with(KHMER_COENG), "{line}");
+                assert!(!line.starts_with(KHMER_COENG), "{line}");
+                let chars: Vec<char> = line.chars().collect();
+                for (index, c) in chars.iter().enumerate() {
+                    if *c == KHMER_COENG {
+                        assert!(
+                            index + 1 < chars.len(),
+                            "coeng left without its subscript: {line}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

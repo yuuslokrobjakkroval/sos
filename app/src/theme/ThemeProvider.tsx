@@ -39,8 +39,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const resolved: ResolvedTheme = choice === "system" ? (systemDark ? "dark" : "light") : choice;
 
   useEffect(() => {
-    document.documentElement.dataset.theme = resolved;
-    document.documentElement.style.colorScheme = resolved;
+    const root = document.documentElement;
+    root.dataset.theme = resolved;
+    root.style.colorScheme = resolved;
+    root.classList.toggle("dark", resolved === "dark");
   }, [resolved]);
 
   const setChoice = (next: ThemeChoice) => {

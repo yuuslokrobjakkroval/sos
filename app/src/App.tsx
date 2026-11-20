@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import { BrowserRouter, HashRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import { useAuth } from "./auth/AuthProvider";
-import { Splash } from "./components/Chrome";
+import { useI18n } from "./i18n/I18nProvider";
 import Shell from "./components/Shell";
 import { EngineProvider } from "./engine/EngineProvider";
 import { ForgotPasswordPage, ResetPasswordPage, SignInPage, SignUpPage } from "./pages/AuthPages";
@@ -40,6 +40,16 @@ export default function App() {
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Router>
+  );
+}
+
+function Splash() {
+  const { dict } = useI18n();
+  return (
+    <div className="grid min-h-svh place-items-center gap-3" role="status">
+      <img src="/icon.svg" alt="" width={48} height={48} />
+      <p>{dict.common.loading}</p>
+    </div>
   );
 }
 

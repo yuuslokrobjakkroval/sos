@@ -1,7 +1,11 @@
-import type { Segment } from "../api";
-import { formatClock, formatNumber, paceFromWpm } from "../format";
-import { useI18n } from "../i18n/I18nProvider";
-import { fill } from "../i18n/text";
+import { Bar, BarChart, CartesianGrid, Cell, ReferenceLine, XAxis, YAxis } from "recharts";
+import type { Segment } from "@/api";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+import { formatClock, paceFromWpm } from "@/format";
+import { useI18n } from "@/i18n/I18nProvider";
+
+const FILL = { slow: "var(--chart-4)", normal: "var(--chart-2)", fast: "var(--chart-1)" };
 
 export default function WpmChart({
   segments,
@@ -12,44 +16,55 @@ export default function WpmChart({
   activeIndex: number;
   onSeek: (ms: number) => void;
 }) {
-  const { dict, locale } = useI18n();
-  const max = Math.max(200, ...segments.map((segment) => segment.wpm));
+  const { dict } = useI18n();
+  const data = segments.map((segment, index) => ({
+    index,
+    time: formatClock(segment.start_ms),
+    start_ms: segment.start_ms,
+    wpm: Math.round(segment.wpm),
+    pace: paceFromWpm(segment.wpm),
+  }));
+  const config = {
+    wpm: { label: dict.detail.speed, color: "var(--chart-2)" },
+  } satisfies ChartConfig;
+
   return (
-    <section className="card chart-card">
-      <div className="chart-head">
-        <h2>{dict.detail.chartTitle}</h2>
-        <p className="muted">{dict.detail.chartHint}</p>
-      </div>
-      <div className="chart-scroll">
-        <div className="chart" style={{ minWidth: Math.max(240, segments.length * 16) }}>
-          <div className="chart-guides" aria-hidden="true">
-            <span style={{ bottom: `${(160 / max) * 100}%` }}>{formatNumber(160, locale)}</span>
-            <span style={{ bottom: `${(110 / max) * 100}%` }}>{formatNumber(110, locale)}</span>
-          </div>
-          <div className="chart-bars" role="list">
-            {segments.map((segment, index) => {
-              const pace = paceFromWpm(segment.wpm);
-              const height = Math.max(6, (segment.wpm / max) * 100);
-              return (
-                <button
-                  key={`${segment.start_ms}-${index}`}
-                  type="button"
-                  role="listitem"
-                  className={`chart-bar pace-${pace} ${index === activeIndex ? "active" : ""}`}
-                  style={{ height: `${height}%` }}
-                  aria-current={index === activeIndex ? "true" : undefined}
-                  aria-label={fill(dict.detail.chartBar, {
-                    time: formatClock(segment.start_ms),
-                    wpm: formatNumber(Math.round(segment.wpm), locale),
-                    pace: dict.pace[pace],
-                  })}
-                  onClick={() => onSeek(segment.start_ms)}
+    <Card>
+      <CardHeader>
+        <CardTitle>{dict.detail.chartTitle}</CardTitle>
+        <CardDescription>{dict.detail.chartHint}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ChartContainer config={config} className="aspect-auto h-56 w-full">
+          <BarChart data={data}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="time" tickLine={false} axisLine={false} interval="preserveStartEnd" />
+            <YAxis tickLine={false} axisLine={false} width={32} />
+            <ReferenceLine y={110} stroke="var(--border)" strokeDasharray="3 3" />
+            <ReferenceLine y={160} stroke="var(--border)" strokeDasharray="3 3" />
+            <ChartTooltip content={<ChartTooltipContent />} />
+            <Bar
+              dataKey="wpm"
+              radius={4}
+              className="cursor-pointer"
+              onClick={(item) => {
+                const row = item as { start_ms?: number; payload?: { start_ms?: number } };
+                const ms = row.start_ms ?? row.payload?.start_ms;
+                if (ms != null) onSeek(ms);
+              }}
+            >
+              {data.map((row) => (
+                <Cell
+                  key={row.index}
+                  fill={FILL[row.pace]}
+                  stroke={row.index === activeIndex ? "var(--foreground)" : "transparent"}
+                  strokeWidth={row.index === activeIndex ? 2 : 0}
                 />
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    </section>
+              ))}
+            </Bar>
+          </BarChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
   );
 }

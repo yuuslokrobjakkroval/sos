@@ -28,11 +28,26 @@ It costs nothing to run. Speech recognition uses [whisper.cpp](https://github.co
 | --- | --- |
 | `crates/core` | Engine: HTTP API (Axum), SQLite storage, background worker, ffmpeg + whisper pipeline, caption and speed analysis |
 | `crates/server` | Website server: runs the engine and serves the built UI from `app/dist` |
-| `app/` | React + TypeScript UI, shared by the website and the desktop app |
+| `app/` | React + TypeScript + Vite UI (Tailwind CSS, shadcn/ui, Hugeicons), shared by the website and the desktop app |
 | `app/src-tauri` | Desktop app: starts the engine inside the app on `127.0.0.1:17890` and opens the UI |
 | `scripts/setup-tools.ps1` | Windows: downloads whisper.cpp and a speech model into `tools/` |
 | `scripts/setup-tools.sh` | Linux and macOS: builds `whisper-cli` and downloads a speech model into `tools/` |
 | `data/` | Created at runtime: `automate.db`, uploaded videos and job files |
+
+## Frontend
+
+The website and the desktop app share the React UI in `app/`. It is styled with **Tailwind CSS** and **[shadcn/ui](https://ui.shadcn.com)** (Radix). Icons come from **[Hugeicons](https://hugeicons.com)** (`@hugeicons/react` and the free set `@hugeicons/core-free-icons`).
+
+- **Language:** English or ភាសាខ្មែរ. The choice is stored in `localStorage`, sets `<html lang>`, and switches the UI font to Khmer OS Battambang (then Khmer OS Siemreap, Noto Sans Khmer, and sans-serif) with a looser line height. Phrases a native speaker should confirm are marked `review:` in `app/src/i18n/km.ts`.
+- **Theme:** light or dark. It follows the system until you toggle it, then the choice is saved. The active dark theme adds the `dark` class.
+- **Sign-in** is a browser demo in `app/src/auth/localAuthService.ts`. Accounts stay in this browser (SHA-256 plus a salt, not a real password hash) and are not checked by the Rust engine. Implement `AuthService` and pass it to `<AuthProvider service={...}>` to use Supabase, Firebase, or your own API.
+- **Routes:** `/` home, `/signup`, `/signin`, `/forgot-password`, `/reset-password`, and the signed-in workspace at `/app` (overview, videos, upload, detail, exports, settings). The website uses those paths. The desktop app uses hash routes so a refresh still resolves.
+
+```bash
+npm --prefix app install
+npm --prefix app run build    # tsc --noEmit && vite build → app/dist
+npm run dev:web               # http://localhost:5173, proxies /api to port 8787
+```
 
 ## One-time setup
 

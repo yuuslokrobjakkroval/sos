@@ -1,27 +1,30 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import {
   exportFileUrl,
   getExport,
   startExport,
   type CaptionExport,
   type ExportMode,
-} from "../api";
-import { useI18n } from "../i18n/I18nProvider";
-import { fill } from "../i18n/text";
+} from "@/api";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useI18n } from "@/i18n/I18nProvider";
+import { fill } from "@/i18n/text";
 
-function kind(dict: ReturnType<typeof useI18n>["dict"], mode: ExportMode): string {
+function kind(dict: ReturnType<typeof useI18n>["dict"], mode: ExportMode) {
   return mode === "soft" ? dict.captionExport.softKind : dict.captionExport.burnedKind;
 }
 
-function statusLine(dict: ReturnType<typeof useI18n>["dict"], job: CaptionExport): string {
+function statusLine(dict: ReturnType<typeof useI18n>["dict"], job: CaptionExport) {
   const label = kind(dict, job.mode);
   if (job.status === "queued") return fill(dict.captionExport.waiting, { kind: label });
   if (job.status === "rendering") {
     if (job.progress == null) return fill(dict.captionExport.renderingPlain, { kind: label });
-    return fill(dict.captionExport.rendering, {
-      kind: label,
-      percent: Math.round(job.progress * 100),
-    });
+    return fill(dict.captionExport.rendering, { kind: label, percent: Math.round(job.progress * 100) });
   }
   if (job.status === "failed") return job.error ?? dict.captionExport.failedFallback;
   return dict.captionExport.ready;
@@ -70,7 +73,9 @@ export default function ExportCaptions({ videoId, language }: { videoId: string;
     try {
       setJob(await startExport(videoId, mode));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : dict.captionExport.failedFallback);
+      const message = caught instanceof Error ? caught.message : dict.captionExport.failedFallback;
+      setError(message);
+      toast.error(message);
       getExport(videoId)
         .then(setJob)
         .catch(() => {});
@@ -79,63 +84,60 @@ export default function ExportCaptions({ videoId, language }: { videoId: string;
     }
   }
 
-  const busy = starting || running;
+  const busy = starting || Boolean(running);
   const ready = job?.status === "done" && job.mode === mode;
   const showStatus = job && (job.status !== "done" || job.mode === mode);
   const percent = Math.round((job?.progress ?? 0) * 100);
   const khmer = language.toLowerCase().startsWith("km");
 
   return (
-    <section className="card export-panel">
-      <h2>{dict.captionExport.title}</h2>
-      <p className="muted">{dict.captionExport.lead}</p>
-      <div className="export-row">
-        <label className="field grow">
-          <span>{dict.captionExport.styleLabel}</span>
-          <select
-            value={mode}
-            disabled={busy}
-            onChange={(event) => {
-              setPicked(true);
-              setMode(event.target.value as ExportMode);
-            }}
-          >
-            <option value="burned">{dict.captionExport.burned}</option>
-            <option value="soft">{dict.captionExport.soft}</option>
-          </select>
-        </label>
-        <button type="button" className="btn primary" onClick={() => void start()} disabled={busy}>
-          {busy ? dict.captionExport.working : dict.captionExport.action}
-        </button>
-        {ready && (
-          <a className="btn" href={exportFileUrl(videoId)} download>
-            {dict.captionExport.download}
-          </a>
-        )}
-      </div>
-      {running && (
-        <div
-          className="progress"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-          aria-label={job ? statusLine(dict, job) : dict.captionExport.working}
+    <Card>
+      <CardHeader>
+        <CardTitle>{dict.captionExport.title}</CardTitle>
+        <CardDescription>{dict.captionExport.lead}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <RadioGroup
+          value={mode}
+          disabled={busy}
+          onValueChange={(value) => {
+            setPicked(true);
+            setMode(value as ExportMode);
+          }}
+          aria-label={dict.captionExport.styleLabel}
+          className="grid gap-2 sm:grid-cols-2"
         >
-          <div style={{ width: `${percent}%` }} />
+          {(["burned", "soft"] as const).map((value) => (
+            <Label
+              key={value}
+              className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 leading-normal has-[[data-state=checked]]:border-primary"
+            >
+              <RadioGroupItem value={value} />
+              {value === "burned" ? dict.captionExport.burned : dict.captionExport.soft}
+            </Label>
+          ))}
+        </RadioGroup>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" onClick={() => void start()} disabled={busy}>
+            {busy ? dict.captionExport.working : dict.captionExport.action}
+          </Button>
+          {ready && (
+            <Button variant="outline" asChild>
+              <a href={exportFileUrl(videoId)} download>
+                {dict.captionExport.download}
+              </a>
+            </Button>
+          )}
         </div>
-      )}
-      {showStatus && job && (
-        <p className={job.status === "failed" ? "field-error" : "muted"} role="status">
-          {statusLine(dict, job)}
-        </p>
-      )}
-      {error && (
-        <p className="field-error" role="alert">
-          {error}
-        </p>
-      )}
-      {khmer && mode === "burned" && <p className="muted">{dict.captionExport.khmerFont}</p>}
-    </section>
+        {running && <Progress value={percent} aria-label={job ? statusLine(dict, job) : dict.captionExport.working} />}
+        {showStatus && job && (
+          <p className={job.status === "failed" ? "text-sm text-destructive" : "text-sm text-muted-foreground"} role="status">
+            {statusLine(dict, job)}
+          </p>
+        )}
+        {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+        {khmer && mode === "burned" && <p className="text-sm text-muted-foreground">{dict.captionExport.khmerFont}</p>}
+      </CardContent>
+    </Card>
   );
 }

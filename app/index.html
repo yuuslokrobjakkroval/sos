@@ -14,6 +14,7 @@
         var systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
         var theme = savedTheme === "light" || savedTheme === "dark" ? savedTheme : systemDark ? "dark" : "light";
         document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.classList.toggle("dark", theme === "dark");
         var savedLocale = localStorage.getItem("automate.locale");
         if (savedLocale === "km" || savedLocale === "en") document.documentElement.lang = savedLocale;
       } catch (e) {}

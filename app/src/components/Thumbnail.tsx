@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { API_BASE, mediaUrl } from "../api";
-import { Icon } from "./Icons";
+import { Film01Icon } from "@hugeicons/core-free-icons";
+import { API_BASE, mediaUrl } from "@/api";
+import { AppIcon } from "@/components/icon";
 
 const hue = (id: string) => {
   let hash = 0;
@@ -59,13 +60,16 @@ export default function Thumbnail({ id, label }: { id: string; label: string }) 
   }, [id]);
 
   return (
-    <div className="thumb" style={{ "--thumb-hue": hue(id) } as CSSProperties}>
+    <div
+      title={label}
+      className="relative aspect-video overflow-hidden bg-muted"
+      style={{ "--thumb": hue(id) } as CSSProperties}
+    >
       {src ? (
-        <img src={src} alt="" />
+        <img src={src} alt="" className="size-full object-cover" />
       ) : (
-        <div className="thumb-fallback" aria-hidden="true">
-          <Icon name="film" width={28} height={28} />
-          <span>{[...label][0]?.toUpperCase() ?? "·"}</span>
+        <div className="absolute inset-0 grid place-items-center text-white" style={{ background: `hsl(${hue(id)} 32% 28%)` }} aria-hidden>
+          <AppIcon icon={Film01Icon} size={28} />
         </div>
       )}
     </div>

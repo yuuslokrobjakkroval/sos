@@ -1,27 +1,67 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
-import { useAuth } from "../auth/AuthProvider";
-import { useEngine } from "../engine/EngineProvider";
-import { useI18n } from "../i18n/I18nProvider";
-import { fill } from "../i18n/text";
+import { useEffect, useMemo, useState } from "react";
+import { Link, Outlet, useLocation, useNavigate, useOutletContext } from "react-router";
 import {
-  AppLogo,
-  CommandText,
-  initials,
-  LanguageSwitch,
-  ThemeToggle,
-} from "./Chrome";
-import { Icon, type IconName } from "./Icons";
+  DashboardSquare01Icon,
+  Download01Icon,
+  Logout01Icon,
+  Settings01Icon,
+  Upload01Icon,
+  UserIcon,
+  Video01Icon,
+} from "@hugeicons/core-free-icons";
+import type { IconSvgElement } from "@hugeicons/react";
+import { useAuth } from "@/auth/AuthProvider";
+import { AppIcon } from "@/components/icon";
+import { BrandLink, LanguageSelect, ThemeToggle } from "@/components/preferences";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar";
+import { useEngine } from "@/engine/EngineProvider";
+import { useI18n } from "@/i18n/I18nProvider";
+import { fill } from "@/i18n/text";
 
-const COLLAPSE_KEY = "automate.nav.collapsed";
 const SETUP_CMD = "scripts\\setup-tools.ps1";
 const SERVER_CMD = "npm run server";
 
-interface ShellContext {
+export interface ShellContext {
   setCrumb: (label: string | null) => void;
 }
-
-export type { ShellContext };
 
 export default function Shell() {
   const { dict } = useI18n();
@@ -29,59 +69,18 @@ export default function Shell() {
   const { videos, health, offline } = useEngine();
   const navigate = useNavigate();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === "1");
-  const [navOpen, setNavOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [crumb, setCrumb] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const searchId = useId();
-  const listId = useId();
   const [query, setQuery] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [activeHit, setActiveHit] = useState(0);
 
   useEffect(() => {
-    setNavOpen(false);
-    setMenuOpen(false);
-    setSearchOpen(false);
+    setQuery("");
   }, [location.pathname]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onDoc(event: MouseEvent) {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
-    }
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenuOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle || !videos) return [];
     return videos.filter((video) => video.filename.toLowerCase().includes(needle)).slice(0, 6);
   }, [query, videos]);
-
-  useEffect(() => setActiveHit(0), [query]);
-
-  function goToVideo(id: string) {
-    setQuery("");
-    setSearchOpen(false);
-    navigate(`/app/videos/${id}`);
-  }
-
-  function toggleCollapsed() {
-    setCollapsed((current) => {
-      localStorage.setItem(COLLAPSE_KEY, current ? "0" : "1");
-      return !current;
-    });
-  }
 
   const section = crumbKey(location.pathname);
   const sectionLabel = dict.nav[section];
@@ -104,178 +103,193 @@ export default function Shell() {
       ].filter((item): item is string => Boolean(item))
     : [];
 
-  const items: { to: string; end?: boolean; icon: IconName; label: string }[] = [
-    { to: "/app", end: true, icon: "overview", label: dict.nav.overview },
-    { to: "/app/videos", icon: "film", label: dict.nav.library },
-    { to: "/app/upload", icon: "upload", label: dict.nav.upload },
-    { to: "/app/exports", icon: "export", label: dict.nav.exports },
-    { to: "/app/settings", icon: "settings", label: dict.nav.settings },
+  const items: { to: string; end?: boolean; icon: IconSvgElement; label: string }[] = [
+    { to: "/app", end: true, icon: DashboardSquare01Icon, label: dict.nav.overview },
+    { to: "/app/videos", icon: Video01Icon, label: dict.nav.library },
+    { to: "/app/upload", icon: Upload01Icon, label: dict.nav.upload },
+    { to: "/app/exports", icon: Download01Icon, label: dict.nav.exports },
+    { to: "/app/settings", icon: Settings01Icon, label: dict.nav.settings },
   ];
 
+  const tip = health
+    ? health.vision
+      ? fill(dict.engine.screenOnTip, { model: health.vision_model ?? "" })
+      : dict.engine.screenOffTip
+    : "";
+  const engineLabel = health
+    ? health.ok
+      ? `${fill(dict.engine.ready, { model: health.model_name ?? "whisper" })}${health.vision ? ` · ${dict.engine.screenOn}` : ""}`
+      : dict.engine.setup
+    : "";
+
   return (
-    <div className={`shell ${collapsed ? "collapsed" : ""} ${navOpen ? "nav-open" : ""}`}>
-      <a className="skip-link" href="#main">
-        {dict.skip}
-      </a>
-      {navOpen && (
-        <button type="button" className="backdrop" aria-label={dict.common.closeMenu} onClick={() => setNavOpen(false)} />
-      )}
-      <aside className="sidebar" aria-label={dict.nav.primary}>
-        <AppLogo compact={collapsed} />
-        <nav className="side-nav">
-          {items.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => (isActive ? "active" : "")}>
-              <Icon name={item.icon} />
-              <span className="nav-label">{item.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-        <div className="side-foot">
-          {health && <EnginePill />}
-          <button type="button" className="nav-collapse" onClick={toggleCollapsed} aria-pressed={collapsed}>
-            <Icon name="chevron" />
-            <span className="nav-label">{collapsed ? dict.nav.expand : dict.nav.collapse}</span>
-          </button>
-        </div>
-      </aside>
-      <div className="shell-main">
-        <header className="navbar">
-          <button type="button" className="icon-btn menu-btn" aria-label={dict.common.openMenu} onClick={() => setNavOpen(true)}>
-            <Icon name="menu" />
-          </button>
-          <nav aria-label={dict.nav.breadcrumb}>
-            <ol className="crumbs">
-              <li>
+    <SidebarProvider>
+      <Sidebar collapsible="icon">
+        <SidebarHeader>
+          <BrandLink to="/app" />
+        </SidebarHeader>
+        <SidebarContent>
+          <SidebarGroup>
+            <SidebarMenu>
+              {items.map((item) => {
+                const active = item.end
+                  ? location.pathname === item.to
+                  : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
+                return (
+                  <SidebarMenuItem key={item.to}>
+                    <SidebarMenuButton asChild isActive={active} tooltip={item.label}>
+                      <Link to={item.to}>
+                        <AppIcon icon={item.icon} />
+                        <span>{item.label}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroup>
+        </SidebarContent>
+        <SidebarFooter>
+          {health && (
+            <p className="px-2 text-xs leading-snug text-sidebar-foreground/70" title={tip}>
+              <span className={`mr-2 inline-block size-2 rounded-full ${health.ok ? "bg-emerald-500" : "bg-amber-500"}`} aria-hidden />
+              {engineLabel}
+              <span className="sr-only">{tip}</span>
+            </p>
+          )}
+        </SidebarFooter>
+      </Sidebar>
+      <SidebarInset>
+        <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground">
+          {dict.skip}
+        </a>
+        <header className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b bg-background/90 px-3 py-2 backdrop-blur">
+          <SidebarTrigger />
+          <Breadcrumb>
+            <BreadcrumbList>
+              <BreadcrumbItem>
                 {section === "overview" && !crumb ? (
-                  <span aria-current="page">{dict.nav.overview}</span>
+                  <BreadcrumbPage>{dict.nav.overview}</BreadcrumbPage>
                 ) : (
-                  <Link to="/app">{dict.nav.overview}</Link>
+                  <BreadcrumbLink asChild>
+                    <Link to="/app">{dict.nav.overview}</Link>
+                  </BreadcrumbLink>
                 )}
-              </li>
+              </BreadcrumbItem>
               {section !== "overview" && (
-                <li>
-                  {crumb ? <Link to={sectionTo}>{sectionLabel}</Link> : <span aria-current="page">{sectionLabel}</span>}
-                </li>
+                <>
+                  <BreadcrumbSeparator />
+                  <BreadcrumbItem>
+                    {crumb ? (
+                      <BreadcrumbLink asChild>
+                        <Link to={sectionTo}>{sectionLabel}</Link>
+                      </BreadcrumbLink>
+                    ) : (
+                      <BreadcrumbPage>{sectionLabel}</BreadcrumbPage>
+                    )}
+                  </BreadcrumbItem>
+                </>
               )}
               {crumb && (
-                <li>
-                  <span aria-current="page" className="truncate">
-                    {crumb}
-                  </span>
-                </li>
+                <>
+                  <BreadcrumbSeparator />
+                  <BreadcrumbItem>
+                    <BreadcrumbPage className="max-w-48 truncate">{crumb}</BreadcrumbPage>
+                  </BreadcrumbItem>
+                </>
               )}
-            </ol>
-          </nav>
-          <div className="search">
-            <label className="sr-only" htmlFor={searchId}>
-              {dict.common.search}
-            </label>
-            <Icon name="search" />
-            <input
-              id={searchId}
-              role="combobox"
-              aria-expanded={searchOpen && query.trim().length > 0}
-              aria-controls={listId}
-              aria-autocomplete="list"
-              placeholder={dict.common.searchPlaceholder}
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setSearchOpen(true);
-              }}
-              onFocus={() => setSearchOpen(true)}
-              onBlur={() => setSearchOpen(false)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setActiveHit((index) => Math.min(index + 1, Math.max(matches.length - 1, 0)));
-                } else if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setActiveHit((index) => Math.max(index - 1, 0));
-                } else if (event.key === "Enter" && matches[activeHit]) {
-                  event.preventDefault();
-                  goToVideo(matches[activeHit].id);
-                } else if (event.key === "Escape") {
-                  setSearchOpen(false);
-                }
-              }}
-            />
-            {searchOpen && query.trim() && (
-              <ul id={listId} role="listbox" className="search-pop">
-                {matches.length === 0 ? (
-                  <li className="muted">{dict.common.noResults}</li>
-                ) : (
-                  matches.map((video, index) => (
-                    <li key={video.id} role="option" aria-selected={index === activeHit}>
-                      <button
-                        type="button"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => goToVideo(video.id)}
-                      >
-                        {video.filename}
-                      </button>
-                    </li>
-                  ))
-                )}
-              </ul>
-            )}
+            </BreadcrumbList>
+          </Breadcrumb>
+          <div className="relative min-w-40 flex-1">
+            <Command shouldFilter={false} className="overflow-visible bg-transparent">
+              <CommandInput
+                aria-label={dict.common.search}
+                placeholder={dict.common.searchPlaceholder}
+                value={query}
+                onValueChange={setQuery}
+              />
+              {query.trim() && (
+                <CommandList className="absolute top-full z-30 mt-1 max-h-64 w-full rounded-lg border bg-popover shadow-md">
+                  {matches.length === 0 ? (
+                    <CommandEmpty>{dict.common.noResults}</CommandEmpty>
+                  ) : (
+                    <CommandGroup>
+                      {matches.map((video) => (
+                        <CommandItem
+                          key={video.id}
+                          value={video.filename}
+                          onSelect={() => {
+                            setQuery("");
+                            navigate(`/app/videos/${video.id}`);
+                          }}
+                        >
+                          {video.filename}
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  )}
+                </CommandList>
+              )}
+            </Command>
           </div>
-          <LanguageSwitch />
+          <LanguageSelect />
           <ThemeToggle />
-          <div className="user-menu" ref={menuRef}>
-            <button
-              type="button"
-              className="avatar"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              aria-label={user?.name ?? dict.nav.profile}
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              {initials(user?.name ?? "")}
-            </button>
-            {menuOpen && (
-              <div role="menu" className="menu">
-                <p className="menu-id">
-                  <strong>{user?.name}</strong>
-                  <span>{user?.email}</span>
-                </p>
-                <Link role="menuitem" to="/app/settings#account" onClick={() => setMenuOpen(false)}>
-                  <Icon name="user" /> {dict.nav.profile}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className="rounded-full" aria-label={user?.name ?? dict.nav.profile}>
+                <Avatar>
+                  <AvatarFallback>{initials(user?.name ?? "")}</AvatarFallback>
+                </Avatar>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel className="flex flex-col gap-0.5">
+                <span>{user?.name}</span>
+                <span className="text-xs font-normal text-muted-foreground">{user?.email}</span>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem asChild>
+                <Link to="/app/settings#account">
+                  <AppIcon icon={UserIcon} /> {dict.nav.profile}
                 </Link>
-                <Link role="menuitem" to="/app/settings" onClick={() => setMenuOpen(false)}>
-                  <Icon name="settings" /> {dict.nav.settings}
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link to="/app/settings">
+                  <AppIcon icon={Settings01Icon} /> {dict.nav.settings}
                 </Link>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    void signOut().then(() => navigate("/"));
-                  }}
-                >
-                  <Icon name="logout" /> {dict.nav.signOut}
-                </button>
-              </div>
-            )}
-          </div>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => {
+                  void signOut().then(() => navigate("/"));
+                }}
+              >
+                <AppIcon icon={Logout01Icon} /> {dict.nav.signOut}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </header>
-        <div className="shell-content" id="main">
+        <div id="main" className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-4 pb-16 md:p-6">
           {offline && (
-            <div className="banner error" role="alert">
-              <CommandText template={dict.engine.offline} command={SERVER_CMD} />
-            </div>
+            <Alert variant="destructive">
+              <AlertDescription>
+                <CommandText template={dict.engine.offline} command={SERVER_CMD} />
+              </AlertDescription>
+            </Alert>
           )}
           {health && !health.ok && (
-            <div className="banner warn" role="status">
-              <p>{fill(dict.engine.missing, { tools: missing.join(dict.engine.listSep) })}</p>
-              <p>
-                <CommandText template={dict.engine.setupHint} command={SETUP_CMD} />
-              </p>
-            </div>
+            <Alert>
+              <AlertDescription>
+                <p>{fill(dict.engine.missing, { tools: missing.join(dict.engine.listSep) })}</p>
+                <p>
+                  <CommandText template={dict.engine.setupHint} command={SETUP_CMD} />
+                </p>
+              </AlertDescription>
+            </Alert>
           )}
           <Outlet context={{ setCrumb } satisfies ShellContext} />
         </div>
-      </div>
-    </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 
@@ -287,23 +301,25 @@ function crumbKey(pathname: string): "overview" | "library" | "upload" | "export
   return "overview";
 }
 
-function EnginePill() {
-  const { dict } = useI18n();
-  const { health } = useEngine();
-  if (!health) return null;
-  const tip = health.vision
-    ? fill(dict.engine.screenOnTip, { model: health.vision_model ?? "" })
-    : dict.engine.screenOffTip;
-  const label = health.ok
-    ? `${fill(dict.engine.ready, { model: health.model_name ?? "whisper" })}${
-        health.vision ? ` · ${dict.engine.screenOn}` : ""
-      }`
-    : dict.engine.setup;
+function initials(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  const words = trimmed.split(/\s+/);
+  if (words.length >= 2) return `${[...words[0]][0] ?? ""}${[...words[1]][0] ?? ""}`.toUpperCase();
+  return ([...trimmed][0] ?? "?").toUpperCase();
+}
+
+function CommandText({ template, command }: { template: string; command: string }) {
+  const [before, after = ""] = template.split("{command}");
   return (
-    <p className={`engine-pill ${health.ok ? "ok" : "warn"}`} title={tip}>
-      <span className="dot" aria-hidden="true" />
-      <span className="nav-label">{label}</span>
-      <span className="sr-only">{tip}</span>
-    </p>
+    <>
+      {before}
+      <code className="rounded bg-muted px-1 py-0.5 text-xs">{command}</code>
+      {after}
+    </>
   );
+}
+
+export function useShell() {
+  return useOutletContext<ShellContext>();
 }

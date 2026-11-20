@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useOutletContext, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
+import { toast } from "sonner";
 import {
   captionsUrl,
   deleteVideo,
@@ -8,16 +9,31 @@ import {
   retryVideo,
   type Status,
   type Video,
-} from "../api";
-import { Dialog, PageHeader, StatusChip } from "../components/Chrome";
-import ExportCaptions from "../components/ExportCaptions";
-import WpmChart from "../components/WpmChart";
-import type { ShellContext } from "../components/Shell";
-import { useEngine } from "../engine/EngineProvider";
-import { isWorking } from "../engine/status";
-import { formatClock, formatNumber } from "../format";
-import { useI18n } from "../i18n/I18nProvider";
-import { fill, languageLabel } from "../i18n/text";
+} from "@/api";
+import ExportCaptions from "@/components/ExportCaptions";
+import { useShell } from "@/components/Shell";
+import { StatusBadge } from "@/components/status-badge";
+import WpmChart from "@/components/WpmChart";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { isWorking } from "@/engine/status";
+import { useEngine } from "@/engine/EngineProvider";
+import { formatClock, formatNumber } from "@/format";
+import { useI18n } from "@/i18n/I18nProvider";
+import { fill, languageLabel, statusText } from "@/i18n/text";
 
 const SPEECH_STEPS: Status[] = ["queued", "extracting_audio", "transcribing", "analyzing"];
 const VISUAL_STEPS: Status[] = ["queued", "extracting_audio", "reading_screen"];
@@ -26,7 +42,7 @@ export default function VideoDetailPage() {
   const { id = "" } = useParams();
   const { dict, locale } = useI18n();
   const { videos, refresh, removeLocal } = useEngine();
-  const { setCrumb } = useOutletContext<ShellContext>();
+  const { setCrumb } = useShell();
   const navigate = useNavigate();
   const summary = videos?.find((video) => video.id === id);
   const [video, setVideo] = useState<Video | null>(null);
@@ -34,11 +50,10 @@ export default function VideoDetailPage() {
   const [vttUrl, setVttUrl] = useState<string | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [query, setQuery] = useState("");
-  const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   const [captionsOn, setCaptionsOn] = useState(true);
   const [confirming, setConfirming] = useState(false);
   const player = useRef<HTMLVideoElement>(null);
-  const activeRow = useRef<HTMLLIElement>(null);
+  const activeRow = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setVideo(null);
@@ -49,7 +64,6 @@ export default function VideoDetailPage() {
 
   useEffect(() => {
     let alive = true;
-    setError(null);
     getVideo(id)
       .then((next) => {
         if (alive) setVideo(next);
@@ -91,7 +105,6 @@ export default function VideoDetailPage() {
   const result = video?.result;
   const segments = result?.segments ?? [];
   const activeIndex = segments.findIndex((segment) => currentMs >= segment.start_ms && currentMs < segment.end_ms);
-
   useEffect(() => {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     activeRow.current?.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
@@ -111,48 +124,23 @@ export default function VideoDetailPage() {
     void element.play().catch(() => {});
   }
 
-  async function remove() {
-    if (!video) return;
-    await deleteVideo(video.id);
-    removeLocal(video.id);
-    navigate("/app/videos");
-  }
-
-  async function retry() {
-    if (!video) return;
-    await retryVideo(video.id);
-    await refresh();
-  }
-
-  async function copyText() {
-    if (!result) return;
-    try {
-      await navigator.clipboard.writeText(result.text);
-      setCopied("ok");
-    } catch {
-      setCopied("fail");
-    }
-    window.setTimeout(() => setCopied("idle"), 1600);
-  }
-
   if (!video && !error) {
     return (
-      <div className="stack" aria-busy="true">
-        <span className="skeleton title" />
-        <span className="skeleton player" />
+      <div className="grid gap-3" aria-busy="true">
+        <Skeleton className="h-10 w-64" />
+        <Skeleton className="h-80 w-full" />
       </div>
     );
   }
-
   if (!video) {
     return (
-      <div className="empty card">
-        <h1>{dict.detail.notFound}</h1>
-        <p>{error}</p>
-        <Link className="btn" to="/app/videos">
-          {dict.detail.back}
-        </Link>
-      </div>
+      <Card>
+        <CardContent className="flex flex-col items-start gap-3 py-10">
+          <h1 className="font-heading text-2xl">{dict.detail.notFound}</h1>
+          <p className="text-muted-foreground">{error}</p>
+          <Button variant="outline" asChild><Link to="/app/videos">{dict.detail.back}</Link></Button>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -167,226 +155,212 @@ export default function VideoDetailPage() {
       : dict.detail.noSpeechFound;
 
   return (
-    <div className="stack detail">
-      <Link className="back-link" to="/app/videos">
-        {dict.detail.back}
-      </Link>
-      <PageHeader
-        title={video.filename}
-        action={
-          <span className="meta">
-            {result && (
-              <span className={`chip ${visual ? "warn" : "ok"}`}>
-                {visual ? dict.mode.visual : result.mode === "silent" ? dict.mode.silent : dict.mode.speech}
-              </span>
-            )}
-            <StatusChip status={video.status} progress={video.progress} />
-          </span>
-        }
-      />
-
-      <div className="player-frame">
+    <div className="flex flex-col gap-4">
+      <Button variant="link" className="w-fit px-0" asChild>
+        <Link to="/app/videos">{dict.detail.back}</Link>
+      </Button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h1 className="font-heading text-2xl leading-snug wrap-break-word">{video.filename}</h1>
+        <div className="flex flex-wrap gap-2">
+          {result && (
+            <Badge variant="secondary">
+              {visual ? dict.mode.visual : result.mode === "silent" ? dict.mode.silent : dict.mode.speech}
+            </Badge>
+          )}
+          <StatusBadge status={video.status} progress={video.progress} />
+        </div>
+      </div>
+      <div className="relative overflow-hidden rounded-xl bg-black">
         <video
           ref={player}
-          className="player"
+          className="max-h-[68vh] w-full"
           src={mediaUrl(video.id)}
           controls
           preload="metadata"
           aria-label={dict.detail.playerLabel}
           onTimeUpdate={(event) => setCurrentMs(event.currentTarget.currentTime * 1000)}
         >
-          {vttUrl && (
-            <track kind="subtitles" src={vttUrl} srcLang={result?.language ?? video.language} label={dict.detail.transcript} />
-          )}
+          {vttUrl && <track kind="subtitles" src={vttUrl} srcLang={result?.language ?? video.language} label={dict.detail.transcript} />}
         </video>
         {captionsOn && active && (
-          <div className="caption-overlay" aria-hidden="true">
+          <div className="pointer-events-none absolute inset-x-[6%] bottom-16 rounded-lg bg-black/75 px-3 py-2 text-center text-base leading-relaxed text-white">
             {visual ? `${activeIndex + 1}. ${active.text}` : active.text}
           </div>
         )}
-        <button
+        <Button
           type="button"
-          className="caption-toggle"
+          size="sm"
+          variant="secondary"
+          className="absolute top-3 right-3"
           aria-pressed={captionsOn}
           onClick={() => setCaptionsOn((value) => !value)}
         >
           {captionsOn ? dict.detail.captionsOn : dict.detail.captionsOff}
-        </button>
+        </Button>
       </div>
-
       {isWorking(video.status) && (
-        <ol className="job-steps" aria-label={dict.detail.progressLabel} style={{ gridTemplateColumns: `repeat(${steps.length}, 1fr)` }}>
+        <ol className="grid gap-2" style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }} aria-label={dict.detail.progressLabel}>
           {steps.map((step, index) => (
-            <li key={step} className={index < stepIndex ? "done" : index === stepIndex ? "current" : ""}>
-              {index === stepIndex ? statusLabel(dict, step, video.progress) : dict.status[step]}
+            <li key={step} className={`border-t-2 pt-2 text-sm ${index < stepIndex ? "border-emerald-600" : index === stepIndex ? "border-primary font-semibold text-primary" : "border-border text-muted-foreground"}`}>
+              {index === stepIndex ? statusText(dict, step, video.progress) : dict.status[step]}
             </li>
           ))}
         </ol>
       )}
-
       {video.status === "failed" && (
-        <div className="banner error" role="alert">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
           <strong>{dict.detail.failedTitle}</strong> {video.error}
-          <button type="button" className="btn small" onClick={() => void retry()}>
-            {dict.detail.tryAgain}
-          </button>
+          <Button size="sm" variant="outline" onClick={() => void retryVideo(video.id).then(() => refresh())}>{dict.detail.tryAgain}</Button>
         </div>
       )}
-
       {result?.notice && (
-        <div className={`banner ${visual ? "info" : "warn"}`} role="status">
+        <div className="rounded-lg bg-muted px-3 py-2 text-sm" role="status">
           <strong>{noticeTitle}</strong> {result.notice}
         </div>
       )}
-
-      {result && (
-        <div className="stat-grid">
-          {visual ? (
-            <Stat label={dict.detail.steps} value={formatNumber(segments.length, locale)} note={dict.detail.stepsNote} />
-          ) : (
-            <Stat
-              label={dict.detail.speed}
-              value={formatNumber(Math.round(result.stats.wpm), locale)}
-              unit={dict.detail.wpmUnit}
-              note={dict.pace[result.stats.pace]}
-              tone={result.stats.pace}
-            />
-          )}
-          <Stat label={dict.detail.words} value={formatNumber(result.stats.word_count, locale)} />
-          <Stat
-            label={dict.detail.duration}
-            value={formatClock(result.stats.duration_sec * 1000)}
-            note={visual ? dict.detail.noVoice : fill(dict.detail.speakingOf, { time: formatClock(result.stats.speaking_sec * 1000) })}
-          />
-          <Stat
-            label={visual ? dict.detail.captionLanguage : dict.detail.language}
-            value={languageLabel(dict, result.language)}
-          />
-        </div>
-      )}
-
-      <div className="detail-split">
-        {result && result.mode === "speech" && segments.length > 0 && (
-          <WpmChart segments={segments} activeIndex={activeIndex} onSeek={seek} />
-        )}
-        <div className="stack">
-          <div className="card action-card">
-            <div className="action-row">
-              {result && (
-                <>
-                  <a className="btn" href={captionsUrl(video.id, "srt")} download>
-                    {dict.detail.downloadSrt}
-                  </a>
-                  <a className="btn" href={captionsUrl(video.id, "vtt")} download>
-                    {dict.detail.downloadVtt}
-                  </a>
-                  <a className="btn" href={captionsUrl(video.id, "txt")} download>
-                    {dict.detail.downloadTxt}
-                  </a>
-                  <button type="button" className="btn" onClick={() => void copyText()}>
-                    {copied === "ok" ? dict.detail.copied : copied === "fail" ? dict.detail.copyFailed : dict.detail.copy}
-                  </button>
-                  <button type="button" className="btn" onClick={() => void retry()} title={dict.detail.analyzeAgain}>
-                    {dict.detail.analyzeAgain}
-                  </button>
-                </>
+      <Tabs defaultValue="transcript">
+        <TabsList className="flex h-auto w-full flex-wrap">
+          <TabsTrigger value="transcript">{visual ? dict.detail.stepsTitle : dict.detail.transcript}</TabsTrigger>
+          <TabsTrigger value="captions">{dict.home.features[1]?.title}</TabsTrigger>
+          <TabsTrigger value="analysis">{dict.detail.speed}</TabsTrigger>
+          <TabsTrigger value="export">{dict.captionExport.action}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="transcript" className="mt-3">
+          <Card>
+            <CardContent className="grid gap-3 pt-4">
+              <Input
+                type="search"
+                value={query}
+                placeholder={dict.detail.search}
+                aria-label={dict.detail.search}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              {segments.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{dict.detail.noSpeech}</p>
+              ) : filtered.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{dict.detail.noMatch}</p>
+              ) : (
+                <ScrollArea className="h-[28rem] pr-3">
+                  <ul className="grid">
+                    {filtered.map((segment) => (
+                      <li key={segment.index}>
+                        <button
+                          type="button"
+                          ref={segment.index === activeIndex ? activeRow : undefined}
+                          aria-current={segment.index === activeIndex ? "true" : undefined}
+                          className={`grid w-full grid-cols-[4rem_minmax(0,1fr)] gap-3 rounded-lg border-l-2 px-3 py-2 text-left leading-relaxed sm:grid-cols-[4rem_minmax(0,1fr)_auto] ${
+                            segment.index === activeIndex ? "border-primary bg-primary/10" : "border-transparent hover:bg-muted"
+                          }`}
+                          onClick={() => seek(segment.start_ms)}
+                        >
+                          <span className="text-primary tabular-nums">{formatClock(segment.start_ms)}</span>
+                          <span>{visual ? `${segment.index + 1}. ${segment.text}` : segment.text}</span>
+                          {!visual && (
+                            <span className="text-sm text-muted-foreground" title={dict.detail.lineSpeed}>
+                              {fill(dict.detail.lineWpm, { n: formatNumber(Math.round(segment.wpm), locale) })}
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
               )}
-              <button type="button" className="btn danger" onClick={() => setConfirming(true)}>
-                {dict.common.delete}
-              </button>
-            </div>
-          </div>
-          {segments.length > 0 && (
-            <ExportCaptions videoId={video.id} language={result?.language ?? video.language} />
-          )}
-        </div>
-      </div>
-
-      {result && (
-        <section className="card transcript">
-          <div className="transcript-head">
-            <h2>{visual ? dict.detail.stepsTitle : dict.detail.transcript}</h2>
-            <label className="sr-only" htmlFor="transcript-search">
-              {dict.detail.search}
-            </label>
-            <input
-              id="transcript-search"
-              type="search"
-              placeholder={dict.detail.search}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-          {segments.length === 0 ? (
-            <p className="muted">{dict.detail.noSpeech}</p>
-          ) : filtered.length === 0 ? (
-            <p className="muted">{dict.detail.noMatch}</p>
-          ) : (
-            <ul>
-              {filtered.map((segment) => (
-                <li key={segment.index} ref={segment.index === activeIndex ? activeRow : undefined} className={segment.index === activeIndex ? "active" : ""}>
-                  <button
-                    type="button"
-                    onClick={() => seek(segment.start_ms)}
-                    aria-current={segment.index === activeIndex ? "true" : undefined}
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="captions" className="mt-3">
+          <Card>
+            <CardContent className="flex flex-wrap gap-2 pt-4">
+              {result ? (
+                <>
+                  <Button variant="outline" asChild><a href={captionsUrl(video.id, "srt")} download>{dict.detail.downloadSrt}</a></Button>
+                  <Button variant="outline" asChild><a href={captionsUrl(video.id, "vtt")} download>{dict.detail.downloadVtt}</a></Button>
+                  <Button variant="outline" asChild><a href={captionsUrl(video.id, "txt")} download>{dict.detail.downloadTxt}</a></Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(result.text).then(
+                        () => toast.success(dict.detail.copied),
+                        () => toast.error(dict.detail.copyFailed),
+                      );
+                    }}
                   >
-                    <span className="time">{formatClock(segment.start_ms)}</span>
-                    <span className="text">{visual ? `${segment.index + 1}. ${segment.text}` : segment.text}</span>
-                    {!visual && (
-                      <span className="wpm" title={dict.detail.lineSpeed}>
-                        {fill(dict.detail.lineWpm, { n: formatNumber(Math.round(segment.wpm), locale) })}
-                      </span>
-                    )}
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    {dict.detail.copy}
+                  </Button>
+                  <Button variant="outline" onClick={() => void retryVideo(video.id).then(() => refresh())}>{dict.detail.analyzeAgain}</Button>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">{dict.common.loading}</p>
+              )}
+              <Button variant="destructive" className="ml-auto" onClick={() => setConfirming(true)}>{dict.common.delete}</Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="analysis" className="mt-3 grid gap-3">
+          {result && (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {visual ? (
+                <Stat label={dict.detail.steps} value={formatNumber(segments.length, locale)} note={dict.detail.stepsNote} />
+              ) : (
+                <Stat label={dict.detail.speed} value={`${formatNumber(Math.round(result.stats.wpm), locale)} ${dict.detail.wpmUnit}`} note={dict.pace[result.stats.pace]} />
+              )}
+              <Stat label={dict.detail.words} value={formatNumber(result.stats.word_count, locale)} />
+              <Stat
+                label={dict.detail.duration}
+                value={formatClock(result.stats.duration_sec * 1000)}
+                note={visual ? dict.detail.noVoice : fill(dict.detail.speakingOf, { time: formatClock(result.stats.speaking_sec * 1000) })}
+              />
+              <Stat label={visual ? dict.detail.captionLanguage : dict.detail.language} value={languageLabel(dict, result.language)} />
+            </div>
           )}
-        </section>
-      )}
-
-      <Dialog open={confirming} title={dict.detail.deleteTitle} onClose={() => setConfirming(false)}>
-        <p>{fill(dict.detail.deleteBody, { name: video.filename })}</p>
-        <div className="action-row">
-          <button type="button" className="btn" onClick={() => setConfirming(false)}>
-            {dict.common.cancel}
-          </button>
-          <button type="button" className="btn danger" onClick={() => void remove()}>
-            {dict.common.delete}
-          </button>
-        </div>
+          {result && result.mode === "speech" && segments.length > 0 && (
+            <WpmChart segments={segments} activeIndex={activeIndex} onSeek={seek} />
+          )}
+        </TabsContent>
+        <TabsContent value="export" className="mt-3">
+          {segments.length > 0 ? (
+            <ExportCaptions videoId={video.id} language={result?.language ?? video.language} />
+          ) : (
+            <p className="text-sm text-muted-foreground">{dict.captionExport.emptyBody}</p>
+          )}
+        </TabsContent>
+      </Tabs>
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{dict.detail.deleteTitle}</DialogTitle>
+            <DialogDescription>{fill(dict.detail.deleteBody, { name: video.filename })}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirming(false)}>{dict.common.cancel}</Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                void deleteVideo(video.id).then(() => {
+                  removeLocal(video.id);
+                  toast.success(dict.common.delete);
+                  navigate("/app/videos");
+                });
+              }}
+            >
+              {dict.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
     </div>
   );
 }
 
-function statusLabel(dict: ReturnType<typeof useI18n>["dict"], status: Status, progress: number | null) {
-  const label = dict.status[status];
-  if (progress == null || !isWorking(status)) return label;
-  return fill(dict.status.withProgress, { label, percent: Math.round(progress * 100) });
-}
-
-function Stat({
-  label,
-  value,
-  unit,
-  note,
-  tone,
-}: {
-  label: string;
-  value: string;
-  unit?: string;
-  note?: string;
-  tone?: string;
-}) {
+function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
-    <article className="card stat">
-      <span className="stat-label">{label}</span>
-      <strong>
-        {value}
-        {unit && <small> {unit}</small>}
-      </strong>
-      {note && <span className={`stat-note ${tone ?? ""}`}>{note}</span>}
-    </article>
+    <Card>
+      <CardContent className="grid gap-1 pt-4">
+        <span className="text-sm text-muted-foreground">{label}</span>
+        <strong className="font-heading text-2xl leading-snug">{value}</strong>
+        {note && <span className="text-sm text-muted-foreground">{note}</span>}
+      </CardContent>
+    </Card>
   );
 }
